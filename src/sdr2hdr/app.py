@@ -19,6 +19,7 @@ from sdr2hdr.io import (
     open_encoder,
     read_frame,
     restamp_hdr_metadata,
+    start_stderr_drain,
 )
 
 PRESETS = {
@@ -335,6 +336,7 @@ def _run_conversion_once(
     _emit_status(callbacks, "Loading AI model")
     processor.enhancer = build_enhancer(request, processor.torch_device)
     decoder = open_decoder(request.input_path, info)
+    start_stderr_drain(decoder)
     encoder = open_encoder(
         request.output_path,
         request.input_path,
@@ -344,6 +346,7 @@ def _run_conversion_once(
         x265_preset=x265_preset,
         x265_crf=x265_crf,
     )
+    start_stderr_drain(encoder)
     processed = 0
     cancelled = False
     encoder_broken_pipe = False
@@ -354,24 +357,40 @@ def _run_conversion_once(
     decode_q: queue.Queue = queue.Queue(maxsize=3)
     encode_q: queue.Queue = queue.Queue(maxsize=3)
     pipeline_error: list[BaseException] = []
+    stop_event = threading.Event()
+
+    def _cancel_requested() -> bool:
+        return bool(cancel_token and cancel_token.cancel_requested)
+
+    def _put_until(target: queue.Queue, item: object, should_abort: Callable[[], bool]) -> bool:
+        # Bounded puts must stay interruptible: if the consumer stops, a plain
+        # blocking put() would hang this thread forever.
+        while not should_abort():
+            try:
+                target.put(item, timeout=0.2)
+                return True
+            except queue.Full:
+                continue
+        return False
 
     def _decoder_thread() -> None:
         try:
             frame_count = 0
-            while True:
-                if cancel_token and cancel_token.cancel_requested:
+            while not stop_event.is_set():
+                if _cancel_requested():
                     break
                 if request.max_frames is not None and frame_count >= request.max_frames:
                     break
                 frame = read_frame(decoder, info.width, info.height)
                 if frame is None:
                     break
-                decode_q.put(frame)
+                if not _put_until(decode_q, frame, lambda: stop_event.is_set() or _cancel_requested()):
+                    break
                 frame_count += 1
         except Exception as exc:
             pipeline_error.append(exc)
         finally:
-            decode_q.put(_SENTINEL)
+            _put_until(decode_q, _SENTINEL, stop_event.is_set)
 
     def _encoder_thread() -> None:
         nonlocal encoder_broken_pipe
@@ -381,11 +400,13 @@ def _run_conversion_once(
                 item = encode_q.get()
                 if item is _SENTINEL:
                     break
+                if encoder_broken_pipe:
+                    # Keep draining so the producer never blocks on a full queue.
+                    continue
                 try:
                     encoder.stdin.write(item.tobytes())
-                except BrokenPipeError:
+                except OSError:
                     encoder_broken_pipe = True
-                    break
         except Exception as exc:
             pipeline_error.append(exc)
 
@@ -396,24 +417,37 @@ def _run_conversion_once(
 
     try:
         while True:
-            if cancel_token and cancel_token.cancel_requested:
+            if _cancel_requested():
                 cancelled = True
                 _emit_status(callbacks, "Cancelling")
                 break
             if encoder_broken_pipe:
                 break
-            item = decode_q.get()
+            if pipeline_error:
+                break
+            try:
+                item = decode_q.get(timeout=0.5)
+            except queue.Empty:
+                if not dec_thread.is_alive():
+                    break
+                continue
             if item is _SENTINEL:
                 break
             hdr_frame = processor.process_frame(item)
-            encode_q.put(hdr_frame)
+            if not _put_until(
+                encode_q,
+                hdr_frame,
+                lambda: encoder_broken_pipe or bool(pipeline_error) or not enc_thread.is_alive(),
+            ):
+                break
             processed += 1
             if processed == 1:
                 _emit_status(callbacks, "Converting")
             elapsed = max(time.monotonic() - start, 1e-6)
             fps = processed / elapsed
             _emit_progress(callbacks, processed, total_frames, fps)
-        encode_q.put(_SENTINEL)
+        stop_event.set()
+        _put_until(encode_q, _SENTINEL, lambda: not enc_thread.is_alive())
         enc_thread.join(timeout=30)
         dec_thread.join(timeout=10)
         if pipeline_error:
@@ -422,6 +456,7 @@ def _run_conversion_once(
         _emit_error(callbacks, str(exc))
         raise
     finally:
+        stop_event.set()
         if cancelled:
             _terminate_process(decoder)
             _wait_terminated_process(decoder)

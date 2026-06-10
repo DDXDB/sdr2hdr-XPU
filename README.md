@@ -34,14 +34,14 @@ OS ごとの backend は次の通りです。
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\activate
-pip install -e .
+pip install -e ".[ai]"
 ```
 
 モデル配置例:
 
 ```text
 models/
-  enhancement_model_20260310.pt
+  enhancement_model_reuse_v1.pt
 ```
 
 ### Quick Start
@@ -64,13 +64,13 @@ GUI の基本動作:
 #### CLI
 
 ```powershell
-python -m sdr2hdr.cli input.mp4 output_hdr.mp4 --model-path models\enhancement_model_20260310.pt
+python -m sdr2hdr.cli input.mp4 output_hdr.mp4 --model-path models\enhancement_model_reuse_v1.pt
 ```
 
 `output_path` を省略した場合は、入力ファイル名の末尾に `_hdr` を付けた名前が自動生成されます。
 
 ```powershell
-python -m sdr2hdr.cli input.mp4 --model-path models\enhancement_model_20260310.pt
+python -m sdr2hdr.cli input.mp4 --model-path models\enhancement_model_reuse_v1.pt
 ```
 
 ### Sample Video
@@ -159,7 +159,7 @@ python -m sdr2hdr.cli input.mp4 output_hdr.mp4 `
   --backend auto `
   --encoder libx265 `
   --x265-mode balanced `
-  --model-path models\enhancement_model_20260310.pt `
+  --model-path models\enhancement_model_reuse_v1.pt `
   --ai-strength 0.25
 ```
 
@@ -220,14 +220,14 @@ Create a virtual environment, install the package, and place a trained model in 
 ```powershell
 python -m venv .venv
 .\.venv\Scripts\activate
-pip install -e .
+pip install -e ".[ai]"
 ```
 
 Example model layout:
 
 ```text
 models/
-  enhancement_model_20260310.pt
+  enhancement_model_reuse_v1.pt
 ```
 
 ### Quick Start
@@ -250,13 +250,13 @@ Basic GUI workflow:
 #### CLI
 
 ```powershell
-python -m sdr2hdr.cli input.mp4 output_hdr.mp4 --model-path models\enhancement_model_20260310.pt
+python -m sdr2hdr.cli input.mp4 output_hdr.mp4 --model-path models\enhancement_model_reuse_v1.pt
 ```
 
 If `output_path` is omitted, the tool automatically creates a name with `_hdr` appended.
 
 ```powershell
-python -m sdr2hdr.cli input.mp4 --model-path models\enhancement_model_20260310.pt
+python -m sdr2hdr.cli input.mp4 --model-path models\enhancement_model_reuse_v1.pt
 ```
 
 ### Sample Video
@@ -345,7 +345,7 @@ python -m sdr2hdr.cli input.mp4 output_hdr.mp4 `
   --backend auto `
   --encoder libx265 `
   --x265-mode balanced `
-  --model-path models\enhancement_model_20260310.pt `
+  --model-path models\enhancement_model_reuse_v1.pt `
   --ai-strength 0.25
 ```
 

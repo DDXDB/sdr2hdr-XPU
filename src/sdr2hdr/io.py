@@ -4,6 +4,7 @@ import json
 import shlex
 import subprocess
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -249,6 +250,34 @@ def read_frame(process: subprocess.Popen[bytes], width: int, height: int) -> np.
     return np.frombuffer(buffer, dtype=np.uint8).reshape(height, width, 3)
 
 
+def start_stderr_drain(process: subprocess.Popen[bytes]) -> None:
+    """Continuously read a process's stderr so the OS pipe buffer never fills up.
+
+    Without this, ffmpeg can block mid-stream once it has written enough to
+    stderr, deadlocking the whole pipeline. The collected output is picked up
+    by finalize_process for error reporting.
+    """
+    stream = process.stderr
+    if stream is None or getattr(process, "_stderr_drain_thread", None) is not None:
+        return
+    chunks: list[bytes] = []
+
+    def _drain() -> None:
+        try:
+            while True:
+                chunk = stream.read(4096)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+        except (OSError, ValueError):
+            pass
+
+    thread = threading.Thread(target=_drain, daemon=True)
+    thread.start()
+    process._stderr_drain_chunks = chunks  # type: ignore[attr-defined]
+    process._stderr_drain_thread = thread  # type: ignore[attr-defined]
+
+
 def finalize_process(process: subprocess.Popen[bytes], name: str, allow_broken_pipe: bool = False) -> None:
     stderr = b""
     if process.stdin is not None:
@@ -259,6 +288,19 @@ def finalize_process(process: subprocess.Popen[bytes], name: str, allow_broken_p
                 raise
     if process.stdout is not None:
         process.stdout.close()
+    drain_thread = getattr(process, "_stderr_drain_thread", None)
+    if drain_thread is not None:
+        return_code = process.wait()
+        drain_thread.join(timeout=5)
+        stderr = b"".join(getattr(process, "_stderr_drain_chunks", []))
+        if process.stderr is not None:
+            process.stderr.close()
+        rendered = stderr.decode("utf-8", errors="replace").strip()
+        if allow_broken_pipe and return_code != 0 and "Broken pipe" in rendered:
+            return
+        if return_code != 0:
+            raise RuntimeError(f"{name} failed with code {return_code}: {rendered}")
+        return
     if process.stderr is not None:
         stderr = process.stderr.read()
         process.stderr.close()
