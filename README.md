@@ -90,6 +90,10 @@ The sample video compares:
 
 - `Preset`
   - 既定値は `portrait`
+- `Tone`
+  - 既定値は `reference`(SDR の白を 203 nits に固定する BT.2408 準拠)。`vivid` は白を peak nits に配置する従来動作
+- `Input EOTF`
+  - 既定値は `bt1886`(放送/BT.709 系動画向け)。PC 由来のソースは `srgb`
 - `Encoder`
   - 環境に応じて `libx265`、`NVENC`、`VideoToolbox` を選択
 - `Speed/Quality`
@@ -278,6 +282,10 @@ YouTube 比較サンプル:
 
 - `Preset`
   - Default: `portrait`
+- `Tone`
+  - Default: `reference` (BT.2408: SDR white anchored at 203 nits). `vivid` keeps the legacy mapping of SDR white to peak nits
+- `Input EOTF`
+  - Default: `bt1886` (for broadcast/BT.709 video). Use `srgb` for PC-origin sources
 - `Encoder`
   - `libx265`, `NVENC`, or `VideoToolbox` depending on platform
 - `Speed/Quality`

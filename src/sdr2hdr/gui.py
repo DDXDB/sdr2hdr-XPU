@@ -172,8 +172,11 @@ class SDR2HDRGUI:
         self.output_var = tk.StringVar()
         self.preset_var = tk.StringVar(value="portrait")
         self.hdr_style_var = tk.StringVar(value="natural")
-        self.tone_var = tk.StringVar(value="vivid")
-        self.input_eotf_var = tk.StringVar(value="srgb")
+        # Default to the reference-grade pipeline: BT.2408 diffuse-white
+        # anchoring and BT.1886 decode for video sources. The CLI keeps
+        # vivid/srgb defaults for backward compatibility.
+        self.tone_var = tk.StringVar(value="reference")
+        self.input_eotf_var = tk.StringVar(value="bt1886")
         self.encoder_var = tk.StringVar(value=self.encoder_options[default_encoder])
         self.x265_mode_var = tk.StringVar(value=X265_MODE_OPTIONS["balanced"])
         self.backend_var = tk.StringVar(value=self.backend_options["auto"])
