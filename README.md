@@ -110,6 +110,17 @@ The sample video compares:
 - `AI Strength`
   - 既定値は `0.25`
 
+#### Preset / HDR Style / Tone の使い分け
+
+3つとも絵に影響しますが、役割が異なります。
+
+- `Preset`: **何を変換するか**で選ぶ(人物中心なら `portrait`)
+- `HDR Style`: **仕上がりの雰囲気**で選ぶ(迷ったら `natural`)
+- `Tone`: **明るさの基準**。`reference` が規格準拠の推奨値。より派手にしたい場合のみ `vivid`
+- `Input EOTF`: 好みではなく**ソースの種類**で決める(TV/カメラ動画 = `bt1886`、PC/Web 由来 = `srgb`)
+
+GUI では各項目にマウスを乗せると説明がツールチップで表示されます。
+
 #### Queue
 
 GUI は複数ジョブの queue 実行に対応しています。
@@ -310,6 +321,17 @@ YouTube 比較サンプル:
   - Rescans `models/`
 - `AI Strength`
   - Default: `0.25`
+
+#### Choosing between Preset, HDR Style, and Tone
+
+All three affect the picture, but they answer different questions.
+
+- `Preset`: pick by **what you are converting** (`portrait` for people-centric footage)
+- `HDR Style`: pick by **the mood you want** (`natural` if unsure)
+- `Tone`: the **brightness standard**. `reference` is the standards-compliant recommendation; use `vivid` only when you want a punchier look
+- `Input EOTF`: determined by **the source, not by taste** (TV/camera video = `bt1886`, PC/web content = `srgb`)
+
+In the GUI, hovering over each control shows a tooltip with the same guidance.
 
 #### Queue
 

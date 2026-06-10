@@ -112,6 +112,52 @@ def open_path(path: str) -> None:
     subprocess.run(["xdg-open", path], check=False)
 
 
+class Tooltip:
+    """Minimal hover tooltip for Tk widgets."""
+
+    def __init__(self, widget: tk.Widget, text: str) -> None:
+        self.widget = widget
+        self.text = text
+        self.window: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+
+    def _show(self, _event: object) -> None:
+        if self.window is not None:
+            return
+        x = self.widget.winfo_rootx() + 16
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.window = tk.Toplevel(self.widget)
+        self.window.wm_overrideredirect(True)
+        self.window.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(
+            self.window,
+            text=self.text,
+            justify="left",
+            background="#ffffe0",
+            foreground="#202020",
+            relief="solid",
+            borderwidth=1,
+            padx=6,
+            pady=4,
+            wraplength=420,
+        )
+        label.pack()
+
+    def _hide(self, _event: object) -> None:
+        if self.window is not None:
+            self.window.destroy()
+            self.window = None
+
+
+CONTROL_TOOLTIPS = {
+    "preset": "Content profile: sets peak nits, protection strength, and processing scale.\n'portrait' is tuned for footage of people.",
+    "hdr_style": "Highlight/shadow character of the result:\nnatural (balanced), cinematic (stronger highlights), night (restrained shadows).",
+    "tone": "Brightness anchoring.\nreference: BT.2408 standard, SDR white at 203 nits (recommended).\nvivid: brighter legacy look, SDR white at peak nits.",
+    "input_eotf": "How the SDR input is decoded. Pick by source, not by taste:\nbt1886 for TV/broadcast/camera video, srgb for PC or web content.",
+}
+
+
 class AppState:
     IDLE = "idle"
     RUNNING = "running"
@@ -230,6 +276,10 @@ class SDR2HDRGUI:
         self.hdr_style_combo = self._add_combo_row(form, 3, "HDR Style", self.hdr_style_var, list(HDR_STYLE_DEFAULTS))
         self.tone_combo = self._add_combo_row(form, 4, "Tone", self.tone_var, list(TONE_DIFFUSE_WHITE))
         self.input_eotf_combo = self._add_combo_row(form, 5, "Input EOTF", self.input_eotf_var, list(INPUT_EOTF_OPTIONS))
+        Tooltip(self.preset_combo, CONTROL_TOOLTIPS["preset"])
+        Tooltip(self.hdr_style_combo, CONTROL_TOOLTIPS["hdr_style"])
+        Tooltip(self.tone_combo, CONTROL_TOOLTIPS["tone"])
+        Tooltip(self.input_eotf_combo, CONTROL_TOOLTIPS["input_eotf"])
         self.encoder_combo = self._add_combo_row(form, 6, "Encoder", self.encoder_var, list(self.encoder_options.values()))
         self.x265_combo = self._add_combo_row(form, 7, "Speed/Quality", self.x265_mode_var, list(X265_MODE_OPTIONS.values()))
         self.backend_combo = self._add_combo_row(form, 8, "Backend", self.backend_var, list(self.backend_options.values()))
