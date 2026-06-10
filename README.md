@@ -56,7 +56,7 @@ GUI の基本動作:
 
 - `Input` と `Output` を指定
 - `Preset` は既定で `portrait`
-- `Tone` は既定で `reference`、`Input EOTF` は既定で `bt1886`
+- `Tone` は既定で `vivid`、`Input EOTF` は既定で `bt1886`
 - `AI Model` で `models/` 内の `.pt` を選択
 - `AI Strength` は既定で `0.25`
 - `Add To Queue` または `Add Files` で queue へ追加
@@ -94,7 +94,7 @@ The sample video compares:
 - `HDR Style`
   - `natural`(既定)、`cinematic`、`night` からハイライト/シャドウの傾向を選択
 - `Tone`
-  - 既定値は `reference`(SDR の白を 203 nits に固定する BT.2408 準拠)。`vivid` は白を peak nits に配置する従来動作
+  - 既定値は `vivid`(SDR の白を peak nits に配置する、効果の分かりやすい絵)。`reference` は BT.2408 準拠で白を 203 nits に固定する控えめな絵
 - `Input EOTF`
   - 既定値は `bt1886`(放送/BT.709 系動画向け)。PC 由来のソースは `srgb`
 - `Encoder`
@@ -116,7 +116,7 @@ The sample video compares:
 
 - `Preset`: **何を変換するか**で選ぶ(人物中心なら `portrait`)
 - `HDR Style`: **仕上がりの雰囲気**で選ぶ(迷ったら `natural`)
-- `Tone`: **明るさの基準**。`reference` が規格準拠の推奨値。より派手にしたい場合のみ `vivid`
+- `Tone`: **明るさの基準**。既定の `vivid` は HDR の効果が分かりやすい派手な絵。放送グレーディングに近い控えめな絵にしたい場合は `reference`
 - `Input EOTF`: 好みではなく**ソースの種類**で決める(TV/カメラ動画 = `bt1886`、PC/Web 由来 = `srgb`)
 
 GUI では各項目にマウスを乗せると説明がツールチップで表示されます。
@@ -268,7 +268,7 @@ Basic GUI workflow:
 
 - Set `Input` and `Output`
 - `Preset` defaults to `portrait`
-- `Tone` defaults to `reference` and `Input EOTF` defaults to `bt1886`
+- `Tone` defaults to `vivid` and `Input EOTF` defaults to `bt1886`
 - Select a `.pt` model from `AI Model`
 - `AI Strength` defaults to `0.25`
 - Add jobs with `Add To Queue` or `Add Files`
@@ -306,7 +306,7 @@ YouTube 比較サンプル:
 - `HDR Style`
   - `natural` (default), `cinematic`, or `night` highlight/shadow behavior
 - `Tone`
-  - Default: `reference` (BT.2408: SDR white anchored at 203 nits). `vivid` keeps the legacy mapping of SDR white to peak nits
+  - Default: `vivid` (SDR white mapped to peak nits for a clearly visible HDR effect). `reference` follows BT.2408 with SDR white anchored at 203 nits for a subtler picture
 - `Input EOTF`
   - Default: `bt1886` (for broadcast/BT.709 video). Use `srgb` for PC-origin sources
 - `Encoder`
@@ -328,7 +328,7 @@ All three affect the picture, but they answer different questions.
 
 - `Preset`: pick by **what you are converting** (`portrait` for people-centric footage)
 - `HDR Style`: pick by **the mood you want** (`natural` if unsure)
-- `Tone`: the **brightness standard**. `reference` is the standards-compliant recommendation; use `vivid` only when you want a punchier look
+- `Tone`: the **brightness standard**. The default `vivid` gives a punchy, clearly-HDR picture; switch to `reference` for a subtler, broadcast-style grade
 - `Input EOTF`: determined by **the source, not by taste** (TV/camera video = `bt1886`, PC/web content = `srgb`)
 
 In the GUI, hovering over each control shows a tooltip with the same guidance.

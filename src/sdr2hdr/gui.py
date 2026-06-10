@@ -153,7 +153,7 @@ class Tooltip:
 CONTROL_TOOLTIPS = {
     "preset": "Content profile: sets peak nits, protection strength, and processing scale.\n'portrait' is tuned for footage of people.",
     "hdr_style": "Highlight/shadow character of the result:\nnatural (balanced), cinematic (stronger highlights), night (restrained shadows).",
-    "tone": "Brightness anchoring.\nreference: BT.2408 standard, SDR white at 203 nits (recommended).\nvivid: brighter legacy look, SDR white at peak nits.",
+    "tone": "Brightness anchoring.\nvivid: bright, punchy HDR look (default).\nreference: BT.2408 standard with SDR white at 203 nits - subtler, closer to broadcast grading.",
     "input_eotf": "How the SDR input is decoded. Pick by source, not by taste:\nbt1886 for TV/broadcast/camera video, srgb for PC or web content.",
 }
 
@@ -218,10 +218,11 @@ class SDR2HDRGUI:
         self.output_var = tk.StringVar()
         self.preset_var = tk.StringVar(value="portrait")
         self.hdr_style_var = tk.StringVar(value="natural")
-        # Default to the reference-grade pipeline: BT.2408 diffuse-white
-        # anchoring and BT.1886 decode for video sources. The CLI keeps
-        # vivid/srgb defaults for backward compatibility.
-        self.tone_var = tk.StringVar(value="reference")
+        # Tone defaults to vivid: the HDR effect is immediately visible, which
+        # matters more here than strict BT.2408 anchoring. "reference" stays
+        # selectable for standards-compliant brightness. BT.1886 remains the
+        # decode default since inputs are typically video sources.
+        self.tone_var = tk.StringVar(value="vivid")
         self.input_eotf_var = tk.StringVar(value="bt1886")
         self.encoder_var = tk.StringVar(value=self.encoder_options[default_encoder])
         self.x265_mode_var = tk.StringVar(value=X265_MODE_OPTIONS["balanced"])
