@@ -32,6 +32,25 @@ def total_variation_loss(tensor: torch.Tensor) -> torch.Tensor:
     return dx + dy
 
 
+def split_train_val_indices(paths: list[Path], val_fraction: float = 0.1) -> tuple[list[int], list[int]]:
+    """Split samples by source video so near-duplicate frames and degradation
+    variants of the same clip never land in both train and val."""
+    groups: dict[str, list[int]] = {}
+    for index, path in enumerate(paths):
+        key = path.name.split("_frame_")[0]
+        groups.setdefault(key, []).append(index)
+    keys = sorted(groups)
+    if len(keys) < 2:
+        indices = list(range(len(paths)))
+        val_size = max(1, len(indices) // 10)
+        return indices[:-val_size] or indices, indices[-val_size:]
+    val_count = min(len(keys) - 1, max(1, round(len(keys) * val_fraction)))
+    val_keys = set(keys[-val_count:])
+    train_indices = [index for key in keys if key not in val_keys for index in groups[key]]
+    val_indices = [index for key in keys if key in val_keys for index in groups[key]]
+    return train_indices, val_indices
+
+
 def _compute_luma(frame: torch.Tensor) -> torch.Tensor:
     return frame[:, 0:1] * 0.2627 + frame[:, 1:2] * 0.6780 + frame[:, 2:3] * 0.0593
 
@@ -103,18 +122,20 @@ def main() -> int:
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--patch-size", type=int, default=256)
     parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--val-fraction", type=float, default=0.1)
+    parser.add_argument("--resume", help="Path to a last.pt checkpoint to resume training from")
     args = parser.parse_args()
 
+    torch.manual_seed(args.seed)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     writer = SummaryWriter(log_dir=str(output_dir / "tensorboard"))
 
-    train_source = HDRSDRPairDataset(args.data_dir, patch_size=args.patch_size, training=True)
-    val_source = HDRSDRPairDataset(args.data_dir, patch_size=args.patch_size, training=False)
-    indices = list(range(len(train_source)))
-    val_size = max(1, len(indices) // 10)
-    train_indices = indices[:-val_size] or indices
-    val_indices = indices[-val_size:]
+    train_source = HDRSDRPairDataset(args.data_dir, patch_size=args.patch_size, training=True, seed=args.seed)
+    val_source = HDRSDRPairDataset(args.data_dir, patch_size=args.patch_size, training=False, seed=args.seed)
+    train_indices, val_indices = split_train_val_indices(train_source.paths, args.val_fraction)
     train_dataset = Subset(train_source, train_indices)
     val_dataset = Subset(val_source, val_indices)
 
@@ -123,15 +144,27 @@ def main() -> int:
 
     device = resolve_training_device(args.device)
     model = EnhancementUNet().to(device)
-    optimizer = AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
+    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
     warmup = LinearLR(optimizer, start_factor=0.2, total_iters=3)
     cosine = CosineAnnealingLR(optimizer, T_max=max(1, args.epochs - 3))
     scheduler = SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[3])
     amp_enabled = device.type == "cuda"
     scaler = torch.amp.GradScaler(device=device.type, enabled=amp_enabled)
     best_val = float("inf")
+    start_epoch = 0
+    if args.resume:
+        checkpoint = torch.load(args.resume, map_location=device)
+        model.load_state_dict(checkpoint["model"])
+        if "optimizer" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer"])
+        if "scheduler" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler"])
+        if "scaler" in checkpoint:
+            scaler.load_state_dict(checkpoint["scaler"])
+        start_epoch = int(checkpoint.get("epoch", -1)) + 1
+        best_val = float(checkpoint.get("best_val", checkpoint.get("val_loss", float("inf"))))
 
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         model.train()
         train_loss = 0.0
         for batch in tqdm(train_loader, desc=f"train {epoch+1}/{args.epochs}"):
@@ -151,6 +184,7 @@ def main() -> int:
 
         model.eval()
         val_loss = 0.0
+        val_components: dict[str, float] = {}
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"val {epoch+1}/{args.epochs}"):
                 sdr_linear = batch["sdr_linear"].to(device)
@@ -158,16 +192,29 @@ def main() -> int:
                 pred = model(sdr_linear)
                 loss, losses = compute_loss(pred, device_batch)
                 val_loss += float(loss.detach().cpu())
+                for name, value in losses.items():
+                    val_components[name] = val_components.get(name, 0.0) + float(value.detach().cpu())
         train_loss /= max(len(train_loader), 1)
         val_loss /= max(len(val_loader), 1)
         writer.add_scalar("loss/train", train_loss, epoch)
         writer.add_scalar("loss/val", val_loss, epoch)
         writer.add_scalar("lr", optimizer.param_groups[0]["lr"], epoch)
-        for name, value in losses.items():
-            writer.add_scalar(f"loss_component/{name}", float(value.detach().cpu()), epoch)
+        for name, total_value in val_components.items():
+            writer.add_scalar(f"loss_component/{name}", total_value / max(len(val_loader), 1), epoch)
         if val_loss < best_val:
             best_val = val_loss
             torch.save({"model": model.state_dict(), "epoch": epoch, "val_loss": val_loss}, output_dir / "best.pt")
+        torch.save(
+            {
+                "model": model.state_dict(),
+                "optimizer": optimizer.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "scaler": scaler.state_dict(),
+                "epoch": epoch,
+                "best_val": best_val,
+            },
+            output_dir / "last.pt",
+        )
 
     writer.close()
     return 0

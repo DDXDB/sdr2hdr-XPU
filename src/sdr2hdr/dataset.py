@@ -207,7 +207,15 @@ class HDRSDRPairDataset(Dataset):
         self.patch_size = patch_size
         self.training = training
         self.paths = sorted(self.data_dir.glob("*.npz"))
+        self.seed = seed
         self.rng = random.Random(seed)
+
+    def _item_rng(self, index: int) -> random.Random:
+        # Seed per item from torch.initial_seed(), which differs per DataLoader
+        # worker and per epoch. A shared self.rng would be forked into every
+        # worker process with identical state, correlating their augmentations.
+        base = torch.initial_seed() if torch is not None else 0
+        return random.Random((self.seed + base + index * 1_000_003) % (2**63))
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -217,11 +225,12 @@ class HDRSDRPairDataset(Dataset):
         sdr_linear = sample["sdr_linear"].astype(np.float32)
         hdr_linear = sample["hdr_linear"].astype(np.float32)
         if self.training:
-            sdr_linear, hdr_linear = random_crop_pair(sdr_linear, hdr_linear, self.patch_size, self.rng)
-            if self.rng.random() < 0.5:
+            rng = self._item_rng(index)
+            sdr_linear, hdr_linear = random_crop_pair(sdr_linear, hdr_linear, self.patch_size, rng)
+            if rng.random() < 0.5:
                 sdr_linear = np.ascontiguousarray(sdr_linear[:, ::-1])
                 hdr_linear = np.ascontiguousarray(hdr_linear[:, ::-1])
-            sdr_linear = augment_sdr(sdr_linear, self.rng)
+            sdr_linear = augment_sdr(sdr_linear, rng)
         elif self.patch_size > 0:
             sdr_linear, hdr_linear = center_crop_pair(sdr_linear, hdr_linear, self.patch_size)
         targets = derive_target_maps(sdr_linear, hdr_linear)

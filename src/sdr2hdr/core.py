@@ -113,6 +113,7 @@ class TemporalState:
         self.prev_chroma_small: np.ndarray | None = None
         self.scene_highlight_boost: float | None = None
         self.prev_gain_small: np.ndarray | None = None
+        self.prev_gain_small_t: "torch.Tensor | None" = None
 
     def reset(self, luma_mean: float, luma_small: np.ndarray, chroma_small: np.ndarray) -> float:
         self.prev_luma_mean = luma_mean
@@ -121,6 +122,7 @@ class TemporalState:
         self.exposure_gain = np.clip(0.22 / max(luma_mean, 1e-4), 0.85, 1.35)
         self.scene_highlight_boost = None
         self.prev_gain_small = None
+        self.prev_gain_small_t = None
         return self.exposure_gain
 
     def scene_change_score(self, luma_small: np.ndarray, chroma_small: np.ndarray) -> float:
@@ -443,6 +445,24 @@ class SDRToHDRProcessor:
         capped = torch.minimum(relight, torch.full_like(relight, 1.0 + self.config.shadow_lift_limit))
         return torch.clamp(relight * (1.0 - shadow) + capped * shadow, 0.0, 4.0)
 
+    def _torch_stabilize_gain_map(self, gain_map: torch.Tensor, strength: float, scene_cut: bool) -> torch.Tensor:
+        # Torch counterpart of TemporalState.stabilize_gain_map that keeps the
+        # EMA state on-device, avoiding a GPU sync per frame.
+        small_gain = self._torch_downsample(gain_map)
+        if strength <= 0.0:
+            self.state.prev_gain_small_t = small_gain
+            return gain_map
+        prev = self.state.prev_gain_small_t
+        if prev is None or scene_cut:
+            stabilized_small = small_gain
+        else:
+            alpha = min(max(strength, 0.0), 0.99)
+            stabilized_small = prev * alpha + small_gain * (1.0 - alpha)
+        self.state.prev_gain_small_t = stabilized_small
+        if stabilized_small.shape == gain_map.shape:
+            return stabilized_small
+        return self._torch_resize_map(stabilized_small, gain_map.shape[0], gain_map.shape[1])
+
     def _torch_skin_mask(self, frame_linear_t: torch.Tensor) -> torch.Tensor:
         r = frame_linear_t[..., 0]
         g = frame_linear_t[..., 1]
@@ -714,12 +734,11 @@ class SDRToHDRProcessor:
         )
         relight = boosted_luma / torch.clamp(relit_luma_t, min=1e-4)
         relight = self._torch_limit_shadow_lift(relight, relit_luma_t)
-        stabilized_relight = self.state.stabilize_gain_map(
-            relight.detach().cpu().numpy(),
+        relight = self._torch_stabilize_gain_map(
+            relight,
             self.config.temporal_stability_strength,
             scene_cut,
         )
-        relight = torch.from_numpy(stabilized_relight).to(frame_linear_t.device, dtype=torch.float32)
         frame_linear_t = torch.clamp(frame_linear_t * relight[..., None], 0.0, 4.0)
         if work_bgr8.shape[:2] != (original_height, original_width):
             frame_linear_t = F.interpolate(

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import torch
 
-from scripts.train import compute_loss, resolve_training_device
+from scripts.train import compute_loss, resolve_training_device, split_train_val_indices
 
 
 class TrainScriptTests(unittest.TestCase):
@@ -44,6 +45,28 @@ class TrainScriptTests(unittest.TestCase):
         loss, components = compute_loss(pred, batch)
         self.assertGreaterEqual(float(loss), 0.0)
         self.assertIn("tone", components)
+
+    def test_split_train_val_indices_groups_by_source_video(self) -> None:
+        paths = [
+            Path("videoA_frame_000001_natural_v00.npz"),
+            Path("videoA_frame_000002_natural_v00.npz"),
+            Path("videoB_frame_000001_natural_v00.npz"),
+            Path("videoB_frame_000002_natural_v00.npz"),
+            Path("videoC_frame_000001_natural_v00.npz"),
+        ]
+        train_indices, val_indices = split_train_val_indices(paths, val_fraction=0.34)
+        train_keys = {paths[index].name.split("_frame_")[0] for index in train_indices}
+        val_keys = {paths[index].name.split("_frame_")[0] for index in val_indices}
+        self.assertTrue(train_keys)
+        self.assertTrue(val_keys)
+        self.assertTrue(train_keys.isdisjoint(val_keys))
+        self.assertEqual(sorted(train_indices + val_indices), list(range(len(paths))))
+
+    def test_split_train_val_indices_falls_back_for_single_video(self) -> None:
+        paths = [Path(f"only_frame_{index:06d}_natural_v00.npz") for index in range(10)]
+        train_indices, val_indices = split_train_val_indices(paths)
+        self.assertTrue(val_indices)
+        self.assertEqual(sorted(train_indices + val_indices), list(range(len(paths))))
 
 
 if __name__ == "__main__":

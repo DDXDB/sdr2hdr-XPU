@@ -30,7 +30,25 @@ X265_MODE_OPTIONS = {
     "final": "Final (Best Quality)",
 }
 
-MODELS_DIR = Path.cwd() / "models"
+def resolve_models_dir() -> Path:
+    """Locate the models folder without depending on the launch directory.
+
+    Order: SDR2HDR_MODELS_DIR env var, ./models relative to the current
+    directory, then the repository checkout next to this package.
+    """
+    env_dir = os.environ.get("SDR2HDR_MODELS_DIR")
+    if env_dir:
+        return Path(env_dir)
+    cwd_models = Path.cwd() / "models"
+    if cwd_models.is_dir():
+        return cwd_models
+    repo_models = Path(__file__).resolve().parents[2] / "models"
+    if repo_models.is_dir():
+        return repo_models
+    return cwd_models
+
+
+MODELS_DIR = resolve_models_dir()
 
 
 def describe_mode_hint(encoder: str, mode: str, backend: str, preset: str, model_path: str) -> str:
@@ -678,8 +696,9 @@ class SDR2HDRGUI:
                 self._set_job_status(self.current_job_index, "failed")
                 self.status_var.set("Failed")
                 self.progress_var.set("Conversion failed")
-                self._log(str(payload))
-                messagebox.showerror("Conversion failed", str(payload))
+                # Log instead of a modal dialog: showerror would block the Tk
+                # event loop and stall the remaining queue until dismissed.
+                self._log(f"Conversion failed: {payload}")
                 self._finish_current_job()
                 next_index = self._next_pending_job_index()
                 if next_index is not None:

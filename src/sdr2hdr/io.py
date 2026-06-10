@@ -98,10 +98,14 @@ def open_decoder(path: str, info: VideoInfo) -> subprocess.Popen[bytes]:
         "rawvideo",
         "-pix_fmt",
         "bgr24",
-        "-vsync",
-        "0",
-        "-",
     ]
+    if info.fps > 0:
+        # Normalize to a constant frame rate: the encoder muxes at a fixed -r,
+        # so passthrough decode of VFR sources would drift out of A/V sync.
+        cmd += ["-fps_mode", "cfr", "-r", f"{info.fps:.06f}"]
+    else:
+        cmd += ["-fps_mode", "passthrough"]
+    cmd += ["-"]
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
 
