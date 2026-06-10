@@ -7,6 +7,24 @@ import cv2
 import numpy as np
 
 from sdr2hdr.ai import BaseEnhancer, HeuristicEnhancer, TorchMapEnhancer
+from sdr2hdr.constants import GRAY_R, GRAY_G, GRAY_B, LUMA_R, LUMA_G, LUMA_B, PQ_M1, PQ_M2, PQ_C1, PQ_C2, PQ_C3
+from sdr2hdr.masks import (
+    apply_near_white_rolloff,
+    build_ai_gate,
+    compute_adaptive_highlight_boost,
+    compute_chroma,
+    compute_luma,
+    estimate_clipped_white_mask,
+    estimate_high_chroma_mask,
+    estimate_memory_color_mask,
+    estimate_noise_mask,
+    estimate_skin_mask,
+    estimate_sky_mask,
+    estimate_specular_mask,
+    estimate_subtitle_mask,
+    estimate_subtitle_mask_fast,
+    limit_ai_highlight_expansion,
+)
 
 try:
     import torch
@@ -24,11 +42,12 @@ REC709_TO_REC2020 = np.array(
     dtype=np.float32,
 )
 
-_PQ_M1 = 2610.0 / 16384.0
-_PQ_M2 = 2523.0 / 32.0
-_PQ_C1 = 3424.0 / 4096.0
-_PQ_C2 = 2413.0 / 128.0
-_PQ_C3 = 2392.0 / 128.0
+# Backward-compatible aliases
+_PQ_M1 = PQ_M1
+_PQ_M2 = PQ_M2
+_PQ_C1 = PQ_C1
+_PQ_C2 = PQ_C2
+_PQ_C3 = PQ_C3
 
 
 def srgb_to_linear(frame: np.ndarray) -> np.ndarray:
@@ -47,32 +66,16 @@ def apply_matrix(frame: np.ndarray, matrix: np.ndarray) -> np.ndarray:
     return np.clip(np.tensordot(frame, matrix.T, axes=1), 0.0, None)
 
 
-def estimate_skin_mask(frame_linear: np.ndarray) -> np.ndarray:
-    r = frame_linear[..., 0]
-    g = frame_linear[..., 1]
-    b = frame_linear[..., 2]
-    sum_rgb = np.maximum(r + g + b, 1e-6)
-    rn = r / sum_rgb
-    gn = g / sum_rgb
-    skin = (
-        (rn > 0.36)
-        & (rn < 0.55)
-        & (gn > 0.25)
-        & (gn < 0.40)
-        & (r > b)
-        & (g > b * 0.9)
-    )
-    return skin.astype(np.float32)
-
-
-def bilateral_detail_boost(luma: np.ndarray, amount: float) -> np.ndarray:
-    base = cv2.bilateralFilter(luma.astype(np.float32), d=0, sigmaColor=0.08, sigmaSpace=5.0)
+def bilateral_detail_boost(luma: np.ndarray, amount: float, scale: float = 1.0) -> np.ndarray:
+    sigma_space = 5.0 * scale
+    base = cv2.bilateralFilter(luma.astype(np.float32), d=0, sigmaColor=0.08, sigmaSpace=sigma_space)
     detail = luma - base
     return np.clip(luma + detail * amount, 0.0, 2.0)
 
 
-def fast_detail_boost(luma: np.ndarray, amount: float) -> np.ndarray:
-    base = cv2.GaussianBlur(luma.astype(np.float32), (0, 0), 1.2)
+def fast_detail_boost(luma: np.ndarray, amount: float, scale: float = 1.0) -> np.ndarray:
+    sigma = 1.2 * scale
+    base = cv2.GaussianBlur(luma.astype(np.float32), (0, 0), sigma)
     detail = luma - base
     return np.clip(luma + detail * amount, 0.0, 2.0)
 
@@ -172,169 +175,8 @@ class TemporalState:
         )
 
 
-def compute_luma(frame_linear: np.ndarray) -> np.ndarray:
-    return 0.2627 * frame_linear[..., 0] + 0.6780 * frame_linear[..., 1] + 0.0593 * frame_linear[..., 2]
-
-
-def compute_chroma(frame_linear: np.ndarray) -> np.ndarray:
-    max_rgb = np.max(frame_linear, axis=2)
-    min_rgb = np.min(frame_linear, axis=2)
-    return max_rgb - min_rgb
-
-
 def downsample_map(image: np.ndarray, size: int = 32) -> np.ndarray:
     return cv2.resize(image.astype(np.float32), (size, size), interpolation=cv2.INTER_AREA)
-
-
-def estimate_subtitle_mask(frame_bgr8: np.ndarray, luma: np.ndarray) -> np.ndarray:
-    gray = cv2.cvtColor(frame_bgr8, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-    height, width = gray.shape
-    lower_band = np.zeros_like(gray, dtype=np.float32)
-    lower_band[int(height * 0.72) :, :] = 1.0
-    bright = (gray > 0.82).astype(np.float32)
-    low_chroma = (np.std(frame_bgr8.astype(np.float32) / 255.0, axis=2) < 0.08).astype(np.float32)
-    local_contrast = cv2.Laplacian(gray, cv2.CV_32F, ksize=3)
-    edge = (np.abs(local_contrast) > 0.12).astype(np.float32)
-    mask = bright * low_chroma * edge * lower_band * (luma < 0.92).astype(np.float32)
-    kernel = np.ones((3, 3), np.uint8)
-    dilated = cv2.dilate((mask > 0).astype(np.uint8), kernel, iterations=1)
-    return dilated.astype(np.float32)
-
-
-def estimate_subtitle_mask_fast(frame_bgr8: np.ndarray, luma: np.ndarray) -> np.ndarray:
-    height, width = luma.shape
-    band_start = int(height * 0.72)
-    gray = cv2.cvtColor(frame_bgr8, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-    gray_band = gray[band_start:, :]
-    luma_band = luma[band_start:, :]
-    rgb_band = frame_bgr8[band_start:, :, :].astype(np.float32) / 255.0
-    small_width = max(64, width // 2)
-    small_height = max(16, gray_band.shape[0] // 2)
-    gray_small = cv2.resize(gray_band, (small_width, small_height), interpolation=cv2.INTER_AREA)
-    luma_small = cv2.resize(luma_band, (small_width, small_height), interpolation=cv2.INTER_AREA)
-    rgb_small = cv2.resize(rgb_band, (small_width, small_height), interpolation=cv2.INTER_AREA)
-    bright = (gray_small > 0.82).astype(np.float32)
-    low_chroma = (np.std(rgb_small, axis=2) < 0.08).astype(np.float32)
-    edge = (np.abs(gray_small - cv2.GaussianBlur(gray_small, (0, 0), 0.8)) > 0.035).astype(np.float32)
-    mask_small = bright * low_chroma * edge * (luma_small < 0.92).astype(np.float32)
-    kernel = np.ones((3, 3), np.uint8)
-    dilated = cv2.dilate((mask_small > 0).astype(np.uint8), kernel, iterations=1).astype(np.float32)
-    mask_band = cv2.resize(dilated, (width, height - band_start), interpolation=cv2.INTER_LINEAR)
-    mask = np.zeros_like(gray, dtype=np.float32)
-    mask[band_start:, :] = np.clip(mask_band, 0.0, 1.0)
-    return mask
-
-
-def estimate_noise_mask(
-    frame_or_luma: np.ndarray,
-    luma_or_threshold: np.ndarray | float,
-    threshold: float | None = None,
-    blur: np.ndarray | None = None,
-) -> np.ndarray:
-    if threshold is None:
-        luma = frame_or_luma
-        threshold = float(luma_or_threshold)
-    else:
-        luma = luma_or_threshold
-        if blur is None:
-            blur = cv2.GaussianBlur(np.clip(compute_luma(frame_or_luma), 0.0, 1.0).astype(np.float32), (0, 0), 1.2)
-    gray = np.clip(luma, 0.0, 1.0).astype(np.float32)
-    blur = blur if blur is not None else cv2.GaussianBlur(gray, (0, 0), 1.2)
-    residual = np.abs(gray - blur)
-    noise = residual / np.maximum(gray + 0.05, 0.05)
-    shadow = np.clip((threshold - luma) / max(threshold, 1e-4), 0.0, 1.0)
-    return np.clip(noise * 6.0, 0.0, 1.0) * shadow
-
-
-def estimate_specular_mask(frame_linear: np.ndarray, luma: np.ndarray) -> np.ndarray:
-    chroma = compute_chroma(frame_linear)
-    neutral = 1.0 - np.clip(chroma / np.maximum(luma, 1e-4), 0.0, 1.0)
-    bright = np.clip((luma - 0.58) / 0.42, 0.0, 1.0)
-    return np.clip(bright * (0.45 + 0.55 * neutral), 0.0, 1.0)
-
-
-def estimate_sky_mask(frame_linear: np.ndarray) -> np.ndarray:
-    r = frame_linear[..., 0]
-    g = frame_linear[..., 1]
-    b = frame_linear[..., 2]
-    blue = (b > g) & (g > r)
-    hue_strength = np.clip((b - r) * 2.4, 0.0, 1.0)
-    vertical = np.linspace(1.0, 0.0, frame_linear.shape[0], dtype=np.float32)[:, None]
-    return blue.astype(np.float32) * hue_strength * vertical
-
-
-def estimate_high_chroma_mask(frame_linear: np.ndarray, luma: np.ndarray) -> np.ndarray:
-    chroma = compute_chroma(frame_linear)
-    saturation = chroma / np.maximum(np.max(frame_linear, axis=2), 1e-4)
-    midtone = 1.0 - np.clip(np.abs(luma - 0.45) / 0.45, 0.0, 1.0)
-    vivid = np.clip((saturation - 0.18) / 0.42, 0.0, 1.0)
-    return np.clip(vivid * (0.35 + 0.65 * midtone), 0.0, 1.0)
-
-
-def estimate_memory_color_mask(frame_linear: np.ndarray, luma: np.ndarray) -> np.ndarray:
-    r = frame_linear[..., 0]
-    g = frame_linear[..., 1]
-    b = frame_linear[..., 2]
-    sum_rgb = np.maximum(r + g + b, 1e-6)
-    rn = r / sum_rgb
-    gn = g / sum_rgb
-    bn = b / sum_rgb
-    foliage = ((gn > rn) & (gn > bn) & (gn > 0.34)).astype(np.float32) * np.clip((gn - bn) * 3.2, 0.0, 1.0)
-    warm = ((rn > gn) & (gn > bn) & (rn > 0.38)).astype(np.float32) * np.clip((rn - bn) * 2.8, 0.0, 1.0)
-    cyan_blue = ((bn > rn) & (bn > 0.32)).astype(np.float32) * np.clip((bn - rn) * 3.0, 0.0, 1.0)
-    valid_luma = np.clip((luma - 0.08) / 0.22, 0.0, 1.0) * (1.0 - np.clip((luma - 0.92) / 0.08, 0.0, 1.0))
-    return np.clip(np.maximum.reduce([foliage, warm, cyan_blue]) * valid_luma, 0.0, 1.0)
-
-
-def build_ai_gate(
-    skin_mask: np.ndarray,
-    subtitle_mask: np.ndarray,
-    noise_mask: np.ndarray,
-    clipped_white_mask: np.ndarray,
-    high_chroma_mask: np.ndarray,
-    memory_color_mask: np.ndarray,
-    learned_protection: np.ndarray,
-) -> np.ndarray:
-    suppression = np.maximum.reduce(
-        [
-            skin_mask * 0.95,
-            subtitle_mask,
-            noise_mask * 0.65,
-            clipped_white_mask * 0.95,
-            high_chroma_mask * 0.75,
-            memory_color_mask * 0.85,
-            learned_protection * 0.60,
-        ]
-    )
-    return np.clip(1.0 - suppression, 0.0, 1.0)
-
-
-def estimate_clipped_white_mask(frame_linear: np.ndarray, luma: np.ndarray, detail_base: np.ndarray | None = None) -> np.ndarray:
-    chroma = compute_chroma(frame_linear)
-    detail_base = detail_base if detail_base is not None else cv2.GaussianBlur(np.clip(luma, 0.0, 1.0).astype(np.float32), (0, 0), 1.4)
-    detail = np.abs(np.clip(luma, 0.0, 1.0) - detail_base)
-    bright = np.clip((luma - 0.72) / 0.22, 0.0, 1.0)
-    neutral = 1.0 - np.clip(chroma / np.maximum(luma, 1e-4), 0.0, 1.0)
-    flat = 1.0 - np.clip(detail / 0.035, 0.0, 1.0)
-    return np.clip(bright * (0.5 + 0.5 * neutral) * flat, 0.0, 1.0)
-
-
-def apply_near_white_rolloff(luma: np.ndarray, start: float, strength: float) -> np.ndarray:
-    if strength <= 0.0:
-        return np.ones_like(luma, dtype=np.float32)
-    ramp = np.clip((luma - start) / max(1.0 - start, 1e-4), 0.0, 1.0)
-    return 1.0 - ramp * strength
-
-
-def limit_ai_highlight_expansion(
-    expansion: np.ndarray,
-    luma: np.ndarray,
-    clipped_white_mask: np.ndarray,
-    rolloff: np.ndarray,
-) -> np.ndarray:
-    near_white = np.clip((luma - 0.7) / 0.25, 0.0, 1.0)
-    suppression = np.clip(clipped_white_mask * 0.85 + near_white * (1.0 - rolloff) * 0.75, 0.0, 0.95)
-    return np.clip(expansion * (1.0 - suppression), 0.0, 1.0)
 
 
 def limit_shadow_lift(relight: np.ndarray, luma: np.ndarray, strength: float) -> np.ndarray:
@@ -343,23 +185,6 @@ def limit_shadow_lift(relight: np.ndarray, luma: np.ndarray, strength: float) ->
     shadow = 1.0 - np.clip(luma / 0.32, 0.0, 1.0)
     capped = np.minimum(relight, 1.0 + strength)
     return np.clip(relight * (1.0 - shadow) + capped * shadow, 0.0, 4.0)
-
-
-def compute_adaptive_highlight_boost(
-    base_boost: float,
-    clipped_white_ratio: float,
-    skin_ratio: float,
-    specular_ratio: float,
-    sky_ratio: float,
-    minimum: float,
-    maximum: float,
-) -> float:
-    adjusted = base_boost
-    adjusted -= clipped_white_ratio * 0.45
-    adjusted -= skin_ratio * 0.18
-    adjusted -= sky_ratio * 0.10
-    adjusted += specular_ratio * 0.22
-    return float(np.clip(adjusted, minimum, maximum))
 
 
 def _torch_compile_available() -> bool:
@@ -386,6 +211,9 @@ class SDRToHDRProcessor:
         self._sky_gradient_height: int | None = None
         self._scaled_shape_cache: dict[tuple[int, int], tuple[int, int]] = {}
         self._compiled = False
+        self._max_pq: float = 0.0
+        self._sum_mean_pq: float = 0.0
+        self._frame_count: int = 0
         if torch is not None and self.torch_device is not None:
             self._rec2020_t = torch.from_numpy(REC709_TO_REC2020).to(self.torch_device, dtype=torch.float32)
             self._laplacian_kernel_t = torch.tensor(
@@ -393,7 +221,7 @@ class SDRToHDRProcessor:
                 device=self.torch_device,
                 dtype=torch.float32,
             )
-            if self.torch_device == "cuda" and _torch_compile_available():
+            if self._is_cuda and _torch_compile_available():
                 self._try_compile()
 
     def _try_compile(self) -> None:
@@ -412,6 +240,20 @@ class SDRToHDRProcessor:
             self._compiled = True
         except Exception:
             self._compiled = False
+
+    def get_measured_max_cll(self) -> tuple[int, int]:
+        """Return measured (MaxCLL, MaxFALL) in nits based on processed frames."""
+        if self._frame_count == 0:
+            return int(self.config.peak_nits), max(int(self.config.peak_nits * 0.4), 1)
+        max_cll = int(min(self._max_pq * self.config.peak_nits, self.config.peak_nits))
+        max_fall = max(int((self._sum_mean_pq / self._frame_count) * self.config.peak_nits), 1)
+        return max_cll, max_fall
+
+    def _update_pq_stats(self, frame_pq: np.ndarray) -> None:
+        pq_float = frame_pq.astype(np.float32) / 65535.0
+        self._max_pq = max(self._max_pq, float(pq_float.max()))
+        self._sum_mean_pq += float(pq_float.mean())
+        self._frame_count += 1
 
     def _resolve_torch_device(self) -> str | None:
         if torch is None:
@@ -438,6 +280,14 @@ class SDRToHDRProcessor:
             return "cuda"
         return None
 
+    @property
+    def _is_cuda(self) -> bool:
+        return self.torch_device is not None and str(self.torch_device).startswith("cuda")
+
+    @property
+    def _is_mps(self) -> bool:
+        return self.torch_device is not None and str(self.torch_device) == "mps"
+
     def _scene_highlight_boost(
         self,
         skin_ratio: float,
@@ -463,12 +313,12 @@ class SDRToHDRProcessor:
     def _tensor_from_rgb(self, frame_rgb: np.ndarray) -> torch.Tensor:
         assert torch is not None
         t = torch.from_numpy(frame_rgb)
-        if self.torch_device == "cuda":
+        if self._is_cuda:
             return t.pin_memory().to(self.torch_device, dtype=torch.float32, non_blocking=True)
         return t.to(self.torch_device, dtype=torch.float32)
 
     def _torch_compute_luma(self, frame_linear: torch.Tensor) -> torch.Tensor:
-        return frame_linear[..., 0] * 0.2627 + frame_linear[..., 1] * 0.6780 + frame_linear[..., 2] * 0.0593
+        return frame_linear[..., 0] * LUMA_R + frame_linear[..., 1] * LUMA_G + frame_linear[..., 2] * LUMA_B
 
     def _torch_compute_chroma(self, frame_linear: torch.Tensor) -> torch.Tensor:
         return torch.amax(frame_linear, dim=2) - torch.amin(frame_linear, dim=2)
@@ -488,7 +338,7 @@ class SDRToHDRProcessor:
     def _torch_downsample(self, image: torch.Tensor, size: int = 32) -> torch.Tensor:
         assert F is not None
         mode = "area"
-        if self.torch_device == "mps":
+        if self._is_mps:
             height, width = image.shape[-2:]
             if height % size != 0 or width % size != 0:
                 mode = "bilinear"
@@ -601,20 +451,25 @@ class SDRToHDRProcessor:
         rn = r / sum_rgb
         gn = g / sum_rgb
         skin = (
-            (rn > 0.36)
+            (rn > 0.32)
             & (rn < 0.55)
-            & (gn > 0.25)
-            & (gn < 0.40)
+            & (gn > 0.24)
+            & (gn < 0.42)
             & (r > b)
-            & (g > b * 0.9)
+            & (g > b * 0.85)
         )
         return skin.to(frame_linear_t.dtype)
 
     def _torch_subtitle_mask(self, frame_rgb_t: torch.Tensor, luma_unit: torch.Tensor) -> torch.Tensor:
-        gray = frame_rgb_t[..., 0] * 0.2990 + frame_rgb_t[..., 1] * 0.5870 + frame_rgb_t[..., 2] * 0.1140
+        gray = frame_rgb_t[..., 0] * GRAY_R + frame_rgb_t[..., 1] * GRAY_G + frame_rgb_t[..., 2] * GRAY_B
         height, width = gray.shape
-        lower_band = torch.zeros_like(gray)
-        lower_band[int(height * 0.72) :, :] = 1.0
+        band_start = int(height * 0.68)
+        band_full = int(height * 0.76)
+        lower_band = torch.zeros(height, device=gray.device, dtype=gray.dtype)
+        ramp_len = max(band_full - band_start, 1)
+        lower_band[band_start:band_full] = torch.linspace(0.0, 1.0, ramp_len, device=gray.device, dtype=gray.dtype)
+        lower_band[band_full:] = 1.0
+        lower_band = lower_band[:, None].expand(height, width)
         bright = (gray > 0.82).to(torch.float32)
         low_chroma = (torch.std(frame_rgb_t, dim=2) < 0.08).to(torch.float32)
         edge = (torch.abs(self._torch_laplacian(gray)) > 0.12).to(torch.float32)
@@ -624,8 +479,8 @@ class SDRToHDRProcessor:
     def _torch_subtitle_mask_fast(self, frame_rgb_t: torch.Tensor, luma_unit: torch.Tensor) -> torch.Tensor:
         assert F is not None
         height, width = luma_unit.shape
-        band_start = int(height * 0.72)
-        gray = frame_rgb_t[..., 0] * 0.2990 + frame_rgb_t[..., 1] * 0.5870 + frame_rgb_t[..., 2] * 0.1140
+        band_start = int(height * 0.68)
+        gray = frame_rgb_t[..., 0] * GRAY_R + frame_rgb_t[..., 1] * GRAY_G + frame_rgb_t[..., 2] * GRAY_B
         gray_band = gray[band_start:, :]
         luma_band = luma_unit[band_start:, :]
         rgb_band = frame_rgb_t[band_start:, :, :]
@@ -660,8 +515,13 @@ class SDRToHDRProcessor:
             mode="bilinear",
             align_corners=False,
         ).squeeze(0).squeeze(0)
+        band_full = int(height * 0.76)
+        ramp_rows = band_full - band_start
+        fade = torch.ones(height - band_start, device=gray.device, dtype=gray.dtype)
+        if ramp_rows > 0:
+            fade[:ramp_rows] = torch.linspace(0.0, 1.0, ramp_rows, device=gray.device, dtype=gray.dtype)
         mask = torch.zeros_like(gray)
-        mask[band_start:, :] = torch.clamp(mask_band, 0.0, 1.0)
+        mask[band_start:, :] = torch.clamp(mask_band * fade[:, None], 0.0, 1.0)
         return mask
 
     def _get_scaled_shape(self, original_height: int, original_width: int) -> tuple[int, int]:
@@ -726,7 +586,7 @@ class SDRToHDRProcessor:
             skin_mask = torch.from_numpy(estimate_skin_mask(frame_linear_np)).to(self.torch_device, dtype=torch.float32)
 
         # --- Phase 3: fp16 mask computation ---
-        _mask_dtype = torch.float16 if self.torch_device == "cuda" else torch.float32
+        _mask_dtype = torch.float16 if (self._is_cuda or self._is_mps) else torch.float32
         frame_linear_h = frame_linear_t.to(_mask_dtype) if _mask_dtype != torch.float32 else frame_linear_t
 
         luma_t = torch.clamp(self._torch_compute_luma(frame_linear_t), 0.0, 2.0)
@@ -819,13 +679,13 @@ class SDRToHDRProcessor:
         ai_gate = ai_gate.to(torch.float32)
         maps_contrast = maps_contrast.to(torch.float32) if maps_contrast.dtype != torch.float32 else maps_contrast
 
-        expanded = torch.clamp(frame_linear_t * (1.0 + highlight_mask[..., None] * base_boost * rolloff[..., None]), 0.0, 4.0)
-        ai_expanded = torch.clamp(
-            frame_linear_t
-            * (1.0 + limited_maps_expansion[..., None] * (scene_boost + 0.4) * rolloff[..., None]),
-            0.0,
-            4.0,
-        )
+        luma_safe = torch.clamp(luma_t, min=1e-4)
+        target_luma = luma_t * (1.0 + highlight_mask * base_boost * rolloff)
+        expand_ratio = (target_luma / luma_safe)[..., None]
+        expanded = torch.clamp(frame_linear_t * expand_ratio, 0.0, 4.0)
+        ai_target_luma = luma_t * (1.0 + limited_maps_expansion * (scene_boost + 0.4) * rolloff)
+        ai_expand_ratio = (ai_target_luma / luma_safe)[..., None]
+        ai_expanded = torch.clamp(frame_linear_t * ai_expand_ratio, 0.0, 4.0)
         blended = expanded * (1.0 - self.config.ai_strength) + ai_expanded * self.config.ai_strength
         noise_limited = (
             blended * (1.0 - noise_mask[..., None] * self.config.shadow_rolloff)
@@ -837,7 +697,9 @@ class SDRToHDRProcessor:
         )
 
         relit_luma_t = torch.clamp(self._torch_compute_luma(frame_linear_t), 0.0, 2.0)
-        detail_base = self._torch_blur(relit_luma_t, 5)
+        detail_scale = max(work_bgr8.shape[0], work_bgr8.shape[1]) / 1920.0
+        detail_kernel = max(3, int(5 * detail_scale) | 1)  # ensure odd
+        detail_base = self._torch_blur(relit_luma_t, detail_kernel)
         detail = relit_luma_t - detail_base
         boosted_luma = torch.clamp(
             relit_luma_t
@@ -870,7 +732,9 @@ class SDRToHDRProcessor:
         assert self._rec2020_t is not None
         frame_2020_t = torch.clamp(torch.matmul(frame_linear_t, self._rec2020_t.T), min=0.0)
         frame_pq_t = self._torch_linear_to_pq(frame_2020_t)
-        return torch.clamp(torch.round(frame_pq_t * 65535.0), 0, 65535).to(torch.uint16).cpu().numpy()
+        frame_16 = torch.clamp(torch.round(frame_pq_t * 65535.0), 0, 65535).to(torch.uint16).cpu().numpy()
+        self._update_pq_stats(frame_16)
+        return frame_16
 
     def process_frame(self, frame_bgr8: np.ndarray) -> np.ndarray:
         if self.torch_device is not None:
@@ -955,13 +819,13 @@ class SDRToHDRProcessor:
             scene_cut,
         )
         base_boost = scene_boost * (0.75 if scene_cut else 1.0)
-        expanded = np.clip(frame_linear * (1.0 + highlight_mask[..., None] * base_boost * rolloff[..., None]), 0.0, 4.0)
-        ai_expanded = np.clip(
-            frame_linear
-            * (1.0 + limited_maps_expansion[..., None] * (scene_boost + 0.4) * rolloff[..., None]),
-            0.0,
-            4.0,
-        )
+        luma_safe = np.maximum(luma, 1e-4)
+        target_luma = luma * (1.0 + highlight_mask * base_boost * rolloff)
+        expand_ratio = (target_luma / luma_safe)[..., None]
+        expanded = np.clip(frame_linear * expand_ratio, 0.0, 4.0)
+        ai_target_luma = luma * (1.0 + limited_maps_expansion * (scene_boost + 0.4) * rolloff)
+        ai_expand_ratio = (ai_target_luma / luma_safe)[..., None]
+        ai_expanded = np.clip(frame_linear * ai_expand_ratio, 0.0, 4.0)
         blended = expanded * (1.0 - self.config.ai_strength) + ai_expanded * self.config.ai_strength
         noise_limited = (
             blended * (1.0 - noise_mask[..., None] * self.config.shadow_rolloff)
@@ -973,11 +837,13 @@ class SDRToHDRProcessor:
         )
 
         relit_luma = np.clip(compute_luma(frame_linear), 0.0, 2.0)
+        detail_scale = max(work_bgr8.shape[0], work_bgr8.shape[1]) / 1920.0
         detail_fn = fast_detail_boost if self.config.fast_mode else bilateral_detail_boost
         boosted_luma = detail_fn(
             relit_luma,
             (self.config.detail_boost * (0.35 + 0.65 * maps.contrast * ai_gate))
             * (1.0 - 0.6 * float(np.mean(noise_mask))),
+            scale=detail_scale,
         )
         relight = boosted_luma / np.maximum(relit_luma, 1e-4)
         relight = limit_shadow_lift(relight, relit_luma, self.config.shadow_lift_limit)
@@ -992,4 +858,5 @@ class SDRToHDRProcessor:
         frame_2020 = apply_matrix(frame_linear, REC709_TO_REC2020)
         frame_pq = linear_to_pq(frame_2020, self.config.peak_nits)
         frame_16 = np.clip(np.round(frame_pq * 65535.0), 0, 65535).astype(np.uint16)
+        self._update_pq_stats(frame_16)
         return frame_16
