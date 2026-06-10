@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 import tempfile
 from pathlib import Path
@@ -230,6 +231,51 @@ def save_contact_sheet(image_paths: list[Path], output_path: Path, columns: int 
     cv2.imwrite(str(output_path), canvas)
 
 
+def _image_luma(image: np.ndarray) -> np.ndarray:
+    image_f = image.astype(np.float32) / 255.0
+    return 0.2126 * image_f[..., 2] + 0.7152 * image_f[..., 1] + 0.0722 * image_f[..., 0]
+
+
+def compute_frame_metrics(sdr_image: np.ndarray, hdr_preview_image: np.ndarray) -> dict[str, float]:
+    sdr_luma = _image_luma(sdr_image)
+    hdr_luma = _image_luma(hdr_preview_image)
+    sdr_shadow = sdr_luma < 0.18
+    hdr_shadow = hdr_luma < 0.18
+    sdr_sat = np.max(sdr_image.astype(np.float32), axis=2)
+    hdr_sat = np.max(hdr_preview_image.astype(np.float32), axis=2)
+    return {
+        "sdr_highlight_clip_ratio": float(np.mean(sdr_sat > 250.0)),
+        "hdr_highlight_clip_ratio": float(np.mean(hdr_sat > 250.0)),
+        "sdr_shadow_detail_std": float(np.std(sdr_luma[sdr_shadow])) if np.any(sdr_shadow) else 0.0,
+        "hdr_shadow_detail_std": float(np.std(hdr_luma[hdr_shadow])) if np.any(hdr_shadow) else 0.0,
+        "mean_luma_gain": float(np.mean(hdr_luma - sdr_luma)),
+        "mean_chroma_delta": float(
+            np.mean(
+                np.abs(
+                    np.std(hdr_preview_image.astype(np.float32) / 255.0, axis=2)
+                    - np.std(sdr_image.astype(np.float32) / 255.0, axis=2)
+                )
+            )
+        ),
+    }
+
+
+def save_metrics_report(metrics: list[dict[str, float]], output_path: Path) -> None:
+    summary: dict[str, float | list[dict[str, float]]] = {"frames": metrics}
+    if metrics:
+        keys = [key for key in metrics[0] if key != "time_sec"]
+        for key in keys:
+            values = [frame[key] for frame in metrics]
+            summary[f"{key}_mean"] = float(np.mean(values))
+        if len(metrics) > 1:
+            hdr_deltas = [
+                abs(metrics[index]["mean_luma_gain"] - metrics[index - 1]["mean_luma_gain"])
+                for index in range(1, len(metrics))
+            ]
+            summary["temporal_luma_delta_mean"] = float(np.mean(hdr_deltas))
+    output_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+
 def build_frames_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Extract preview frames from a video.")
     parser.add_argument("input", help="Input video path")
@@ -250,6 +296,7 @@ def build_compare_parser() -> argparse.ArgumentParser:
     parser.add_argument("output_dir", help="Directory to write comparison PNG files")
     parser.add_argument("--times", help="Comma-separated times in seconds")
     parser.add_argument("--count", type=int, default=4, help="Number of evenly spaced frames when --times is omitted")
+    parser.add_argument("--metrics-json", help="Optional path to write comparison metrics as JSON")
     return parser
 
 
@@ -291,6 +338,7 @@ def compare_main(argv: list[str] | None = None) -> int:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     comparison_paths: list[Path] = []
+    metrics_rows: list[dict[str, float]] = []
     with tempfile.TemporaryDirectory(prefix="sdr2hdr-review-") as temp_dir:
         temp_path = Path(temp_dir)
         for index, time_sec in enumerate(times):
@@ -302,11 +350,20 @@ def compare_main(argv: list[str] | None = None) -> int:
             save_hdr_preview_png(args.hdr_input, time_sec, str(hdr_preview_path), hdr_info.width, hdr_info.height)
             save_hdr_exr(args.hdr_input, time_sec, str(hdr_exr_path), hdr_info.width, hdr_info.height)
             save_side_by_side(str(sdr_path), str(hdr_preview_path), str(comparison_path), f"t={time_sec:.3f}s")
+            sdr_image = cv2.imread(str(sdr_path), cv2.IMREAD_COLOR)
+            hdr_image = cv2.imread(str(hdr_preview_path), cv2.IMREAD_COLOR)
+            if sdr_image is not None and hdr_image is not None:
+                row = compute_frame_metrics(sdr_image, hdr_image)
+                row["time_sec"] = time_sec
+                metrics_rows.append(row)
             comparison_paths.append(comparison_path)
             print(comparison_path)
             print(hdr_exr_path)
     save_contact_sheet(comparison_paths, output_dir / "contact_sheet.png")
     print(output_dir / "contact_sheet.png")
+    if args.metrics_json:
+        save_metrics_report(metrics_rows, Path(args.metrics_json))
+        print(Path(args.metrics_json))
     return 0
 
 
@@ -337,6 +394,8 @@ def main(argv: list[str] | None = None) -> int:
     forwarded = [args.sdr_input, args.hdr_input, args.output_dir, "--count", str(args.count)]
     if args.times:
         forwarded.extend(["--times", args.times])
+    if args.metrics_json:
+        forwarded.extend(["--metrics-json", args.metrics_json])
     return compare_main(forwarded)
 
 

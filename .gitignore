@@ -17,6 +17,11 @@ test_output*.mp4
 vt_probe.mp4
 review/
 review_samples/
+compare_concat_list.txt
+compare_full_concat_list.txt
+
+# Training artifacts
+training_runs/
 
 # IDEs
 .idea/

@@ -63,6 +63,27 @@ X265_PROFILE_DEFAULTS = {
     "final": {"preset": "slow", "crf": 14},
 }
 
+HDR_STYLE_DEFAULTS = {
+    "natural": {
+        "highlight_boost": 0.95,
+        "shadow_lift_limit": 0.45,
+        "temporal_stability_strength": 0.82,
+        "detail_boost_scale": 0.95,
+    },
+    "cinematic": {
+        "highlight_boost": 1.12,
+        "shadow_lift_limit": 0.55,
+        "temporal_stability_strength": 0.70,
+        "detail_boost_scale": 1.05,
+    },
+    "night": {
+        "highlight_boost": 0.86,
+        "shadow_lift_limit": 0.32,
+        "temporal_stability_strength": 0.88,
+        "detail_boost_scale": 0.90,
+    },
+}
+
 
 @dataclass
 class ConversionRequest:
@@ -80,6 +101,7 @@ class ConversionRequest:
     processing_scale: float | None = None
     fast_mode: bool = False
     backend: str = "auto"
+    hdr_style: str = "natural"
     model_path: str | None = None
     device: str = "cpu"
     max_frames: int | None = None
@@ -137,6 +159,11 @@ def build_request_config(request: ConversionRequest) -> tuple[ProcessorConfig, s
         config.processing_scale = request.processing_scale
     if request.fast_mode:
         config.fast_mode = True
+    style = HDR_STYLE_DEFAULTS[request.hdr_style]
+    config.highlight_boost *= style["highlight_boost"]
+    config.shadow_lift_limit = style["shadow_lift_limit"]
+    config.temporal_stability_strength = style["temporal_stability_strength"]
+    config.detail_boost *= style["detail_boost_scale"]
     config.backend = request.backend
     profile = X265_PROFILE_DEFAULTS[request.x265_mode]
     x265_preset = request.x265_preset or profile["preset"]
@@ -161,6 +188,8 @@ def validate_request(request: ConversionRequest) -> None:
         raise ValueError(f"Unsupported model format: {model_path.suffix}")
     if request.preset not in PRESETS:
         raise ValueError(f"Unknown preset: {request.preset}")
+    if request.hdr_style not in HDR_STYLE_DEFAULTS:
+        raise ValueError(f"Unknown HDR style: {request.hdr_style}")
     if request.x265_mode not in X265_PROFILE_DEFAULTS:
         raise ValueError(f"Unknown x265 mode: {request.x265_mode}")
     if request.model_path and not model_path.exists():

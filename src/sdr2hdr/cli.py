@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from .app import (
+    HDR_STYLE_DEFAULTS,
     PRESETS,
     X265_PROFILE_DEFAULTS,
     ConversionCallbacks,
@@ -22,6 +23,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--encoder", default="libx265")
     parser.add_argument("--x265-mode", choices=sorted(X265_PROFILE_DEFAULTS), default="balanced")
     parser.add_argument("--backend", choices=["auto", "numpy", "cuda", "mps"], default="auto")
+    parser.add_argument("--hdr-style", choices=sorted(HDR_STYLE_DEFAULTS), default="natural")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--model-path", required=True, help="Path to a TorchScript .pt enhancement model")
     parser.add_argument("--ai-strength", type=float, default=0.25)
@@ -53,6 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         encoder=args.encoder,
         x265_mode=args.x265_mode,
         backend=args.backend,
+        hdr_style=args.hdr_style,
         device=args.device,
         model_path=model_path,
         ai_strength=args.ai_strength,

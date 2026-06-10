@@ -98,6 +98,8 @@ class ProcessorConfig:
     adaptive_highlight: bool = True
     adaptive_highlight_min: float = 0.55
     adaptive_highlight_max: float = 1.05
+    temporal_stability_strength: float = 0.72
+    shadow_lift_limit: float = 0.55
 
 
 class TemporalState:
@@ -107,6 +109,7 @@ class TemporalState:
         self.prev_luma_small: np.ndarray | None = None
         self.prev_chroma_small: np.ndarray | None = None
         self.scene_highlight_boost: float | None = None
+        self.prev_gain_small: np.ndarray | None = None
 
     def reset(self, luma_mean: float, luma_small: np.ndarray, chroma_small: np.ndarray) -> float:
         self.prev_luma_mean = luma_mean
@@ -114,6 +117,7 @@ class TemporalState:
         self.prev_chroma_small = chroma_small
         self.exposure_gain = np.clip(0.22 / max(luma_mean, 1e-4), 0.85, 1.35)
         self.scene_highlight_boost = None
+        self.prev_gain_small = None
         return self.exposure_gain
 
     def scene_change_score(self, luma_small: np.ndarray, chroma_small: np.ndarray) -> float:
@@ -142,6 +146,30 @@ class TemporalState:
         self.prev_luma_small = luma_small
         self.prev_chroma_small = chroma_small
         return self.exposure_gain, scene_cut
+
+    def stabilize_gain_map(
+        self,
+        gain_map: np.ndarray,
+        strength: float,
+        scene_cut: bool,
+    ) -> np.ndarray:
+        if strength <= 0.0:
+            self.prev_gain_small = downsample_map(gain_map)
+            return gain_map
+        small_gain = downsample_map(gain_map)
+        if self.prev_gain_small is None or scene_cut:
+            stabilized_small = small_gain
+        else:
+            alpha = np.clip(strength, 0.0, 0.99)
+            stabilized_small = self.prev_gain_small * alpha + small_gain * (1.0 - alpha)
+        self.prev_gain_small = stabilized_small.astype(np.float32, copy=False)
+        if stabilized_small.shape == gain_map.shape:
+            return stabilized_small
+        return cv2.resize(
+            stabilized_small.astype(np.float32),
+            (gain_map.shape[1], gain_map.shape[0]),
+            interpolation=cv2.INTER_LINEAR,
+        )
 
 
 def compute_luma(frame_linear: np.ndarray) -> np.ndarray:
@@ -307,6 +335,14 @@ def limit_ai_highlight_expansion(
     near_white = np.clip((luma - 0.7) / 0.25, 0.0, 1.0)
     suppression = np.clip(clipped_white_mask * 0.85 + near_white * (1.0 - rolloff) * 0.75, 0.0, 0.95)
     return np.clip(expansion * (1.0 - suppression), 0.0, 1.0)
+
+
+def limit_shadow_lift(relight: np.ndarray, luma: np.ndarray, strength: float) -> np.ndarray:
+    if strength <= 0.0:
+        return relight
+    shadow = 1.0 - np.clip(luma / 0.32, 0.0, 1.0)
+    capped = np.minimum(relight, 1.0 + strength)
+    return np.clip(relight * (1.0 - shadow) + capped * shadow, 0.0, 4.0)
 
 
 def compute_adaptive_highlight_boost(
@@ -549,6 +585,13 @@ class SDRToHDRProcessor:
         near_white = torch.clamp((luma_unit - 0.7) / 0.25, 0.0, 1.0)
         suppression = torch.clamp(clipped_white_mask * 0.85 + near_white * (1.0 - rolloff) * 0.75, 0.0, 0.95)
         return torch.clamp(expansion * (1.0 - suppression), 0.0, 1.0)
+
+    def _torch_limit_shadow_lift(self, relight: torch.Tensor, luma: torch.Tensor) -> torch.Tensor:
+        if self.config.shadow_lift_limit <= 0.0:
+            return relight
+        shadow = 1.0 - torch.clamp(luma / 0.32, 0.0, 1.0)
+        capped = torch.minimum(relight, torch.full_like(relight, 1.0 + self.config.shadow_lift_limit))
+        return torch.clamp(relight * (1.0 - shadow) + capped * shadow, 0.0, 4.0)
 
     def _torch_skin_mask(self, frame_linear_t: torch.Tensor) -> torch.Tensor:
         r = frame_linear_t[..., 0]
@@ -808,6 +851,13 @@ class SDRToHDRProcessor:
             2.0,
         )
         relight = boosted_luma / torch.clamp(relit_luma_t, min=1e-4)
+        relight = self._torch_limit_shadow_lift(relight, relit_luma_t)
+        stabilized_relight = self.state.stabilize_gain_map(
+            relight.detach().cpu().numpy(),
+            self.config.temporal_stability_strength,
+            scene_cut,
+        )
+        relight = torch.from_numpy(stabilized_relight).to(frame_linear_t.device, dtype=torch.float32)
         frame_linear_t = torch.clamp(frame_linear_t * relight[..., None], 0.0, 4.0)
         if work_bgr8.shape[:2] != (original_height, original_width):
             frame_linear_t = F.interpolate(
@@ -930,6 +980,12 @@ class SDRToHDRProcessor:
             * (1.0 - 0.6 * float(np.mean(noise_mask))),
         )
         relight = boosted_luma / np.maximum(relit_luma, 1e-4)
+        relight = limit_shadow_lift(relight, relit_luma, self.config.shadow_lift_limit)
+        relight = self.state.stabilize_gain_map(
+            relight,
+            self.config.temporal_stability_strength,
+            scene_cut,
+        )
         frame_linear = np.clip(frame_linear * relight[..., None], 0.0, 4.0)
         if work_bgr8.shape[:2] != (original_height, original_width):
             frame_linear = cv2.resize(frame_linear, (original_width, original_height), interpolation=cv2.INTER_LINEAR)

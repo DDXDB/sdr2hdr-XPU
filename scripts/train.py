@@ -32,18 +32,66 @@ def total_variation_loss(tensor: torch.Tensor) -> torch.Tensor:
     return dx + dy
 
 
-def compute_loss(pred: torch.Tensor, target_maps: torch.Tensor, clip_mask: torch.Tensor) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+def _compute_luma(frame: torch.Tensor) -> torch.Tensor:
+    return frame[:, 0:1] * 0.2627 + frame[:, 1:2] * 0.6780 + frame[:, 2:3] * 0.0593
+
+
+def _compute_heuristic_base_maps(sdr_linear: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    sdr_luma = torch.clamp(_compute_luma(sdr_linear), 0.0, 1.0)
+    smooth = torch.nn.functional.avg_pool2d(sdr_luma, 11, stride=1, padding=5)
+    detail = torch.clamp(sdr_luma - smooth, -0.2, 0.2)
+    base_exp = torch.clamp((sdr_luma - 0.55) / 0.45, 0.0, 1.0)
+    base_con = torch.clamp(torch.abs(detail) * 6.0, 0.0, 1.0)
+    return base_exp, base_con
+
+
+def compute_loss(
+    pred: torch.Tensor,
+    batch: dict[str, torch.Tensor],
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    target_maps = batch["target_maps"]
+    clip_mask = batch["clip_mask"]
+    near_white_mask = batch["near_white_mask"]
+    shadow_mask = batch["shadow_mask"]
+    memory_color_mask = batch["memory_color_mask"]
+    region_weight = batch["region_weight"]
+    sdr_linear = batch["sdr_linear"]
     confidence = 1.0 - clip_mask * 0.8
     pred_exp, pred_con, pred_pro = pred[:, 0:1], pred[:, 1:2], pred[:, 2:3]
     tgt_exp, tgt_con, tgt_pro = target_maps[:, 0:1], target_maps[:, 1:2], target_maps[:, 2:3]
+    base_exp, base_con = _compute_heuristic_base_maps(sdr_linear)
+    pred_exp_abs = torch.clamp(base_exp + pred_exp, 0.0, 1.0)
+    tgt_exp_abs = torch.clamp(base_exp + tgt_exp, 0.0, 1.0)
+    pred_con_abs = torch.clamp(base_con + pred_con, 0.0, 1.0)
+    tgt_con_abs = torch.clamp(base_con + tgt_con, 0.0, 1.0)
+    sdr_luma = torch.clamp(_compute_luma(sdr_linear), 0.0, 1.0)
+    pred_tone = sdr_luma + pred_exp_abs * (1.0 - sdr_luma)
+    tgt_tone = sdr_luma + tgt_exp_abs * (1.0 - sdr_luma)
     protected_weight = 1.0 + torch.clamp(tgt_pro, min=0.0) * 1.5
     overdrive = torch.clamp(pred_exp - tgt_exp, min=0.0)
-    l_exp = (confidence * protected_weight * torch.abs(pred_exp - tgt_exp)).mean() + (protected_weight * overdrive).mean() * 0.5
-    l_con = (confidence * (1.0 + torch.clamp(tgt_pro, min=0.0)) * torch.abs(pred_con - tgt_con)).mean()
+    weighted_confidence = confidence * region_weight
+    l_exp = (weighted_confidence * protected_weight * torch.abs(pred_exp - tgt_exp)).mean()
+    l_exp = l_exp + (protected_weight * overdrive).mean() * 0.5
+    l_con = (weighted_confidence * (1.0 + torch.clamp(tgt_pro, min=0.0)) * torch.abs(pred_con - tgt_con)).mean()
     l_pro = torch.abs(pred_pro - tgt_pro).mean()
+    l_tone = torch.abs(pred_tone - tgt_tone).mean()
+    l_memory = (memory_color_mask * torch.abs(pred_exp_abs - tgt_exp_abs)).mean()
+    l_memory = l_memory + 0.35 * (memory_color_mask * torch.abs(pred_con_abs - tgt_con_abs)).mean()
+    shadow_overdrive = torch.clamp(pred_exp_abs - tgt_exp_abs, min=0.0)
+    l_shadow = (shadow_mask * shadow_overdrive).mean() + 0.2 * (shadow_mask * torch.clamp(pred_con_abs - tgt_con_abs, min=0.0)).mean()
+    l_rolloff = (near_white_mask * torch.clamp(pred_exp_abs - tgt_exp_abs, min=0.0)).mean()
     l_tv = total_variation_loss(pred_exp) * 0.01
-    total = 1.0 * l_exp + 0.5 * l_con + 0.75 * l_pro + l_tv
-    return total, {"exp": l_exp, "con": l_con, "pro": l_pro, "tv": l_tv}
+    total = 1.0 * l_exp + 0.5 * l_con + 0.75 * l_pro + 0.6 * l_tone + 0.45 * l_memory + 0.35 * l_shadow + 0.4 * l_rolloff + l_tv
+    return total, {
+        "exp": l_exp,
+        "con": l_con,
+        "pro": l_pro,
+        "tone": l_tone,
+        "memory": l_memory,
+        "shadow": l_shadow,
+        "rolloff": l_rolloff,
+        "tv": l_tv,
+    }
 
 
 def main() -> int:
@@ -88,12 +136,11 @@ def main() -> int:
         train_loss = 0.0
         for batch in tqdm(train_loader, desc=f"train {epoch+1}/{args.epochs}"):
             sdr_linear = batch["sdr_linear"].to(device)
-            target_maps = batch["target_maps"].to(device)
-            clip_mask = batch["clip_mask"].to(device)
+            device_batch = {key: value.to(device) for key, value in batch.items()}
             optimizer.zero_grad(set_to_none=True)
             with torch.amp.autocast(device_type=device.type, enabled=amp_enabled):
                 pred = model(sdr_linear)
-                loss, _ = compute_loss(pred, target_maps, clip_mask)
+                loss, _ = compute_loss(pred, device_batch)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -107,16 +154,17 @@ def main() -> int:
         with torch.no_grad():
             for batch in tqdm(val_loader, desc=f"val {epoch+1}/{args.epochs}"):
                 sdr_linear = batch["sdr_linear"].to(device)
-                target_maps = batch["target_maps"].to(device)
-                clip_mask = batch["clip_mask"].to(device)
+                device_batch = {key: value.to(device) for key, value in batch.items()}
                 pred = model(sdr_linear)
-                loss, losses = compute_loss(pred, target_maps, clip_mask)
+                loss, losses = compute_loss(pred, device_batch)
                 val_loss += float(loss.detach().cpu())
         train_loss /= max(len(train_loader), 1)
         val_loss /= max(len(val_loader), 1)
         writer.add_scalar("loss/train", train_loss, epoch)
         writer.add_scalar("loss/val", val_loss, epoch)
         writer.add_scalar("lr", optimizer.param_groups[0]["lr"], epoch)
+        for name, value in losses.items():
+            writer.add_scalar(f"loss_component/{name}", float(value.detach().cpu()), epoch)
         if val_loss < best_val:
             best_val = val_loss
             torch.save({"model": model.state_dict(), "epoch": epoch, "val_loss": val_loss}, output_dir / "best.pt")

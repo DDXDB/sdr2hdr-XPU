@@ -35,10 +35,15 @@ class ModelDatasetTests(unittest.TestCase):
         self.assertEqual(targets.expansion.shape, (32, 32))
         self.assertEqual(targets.contrast.shape, (32, 32))
         self.assertEqual(targets.protection.shape, (32, 32))
+        self.assertEqual(targets.near_white_mask.shape, (32, 32))
+        self.assertEqual(targets.shadow_mask.shape, (32, 32))
+        self.assertEqual(targets.memory_color_mask.shape, (32, 32))
+        self.assertEqual(targets.region_weight.shape, (32, 32))
         self.assertTrue(np.all(targets.expansion >= -1.0))
         self.assertTrue(np.all(targets.expansion <= 1.0))
         self.assertTrue(np.all(targets.protection >= -1.0))
         self.assertTrue(np.all(targets.protection <= 1.0))
+        self.assertTrue(np.all(targets.region_weight >= 1.0))
 
     def test_derive_target_maps_reduces_expansion_for_vivid_memory_colors(self) -> None:
         sdr = np.full((16, 16, 3), [0.18, 0.55, 0.12], dtype=np.float32)
@@ -60,6 +65,10 @@ class ModelDatasetTests(unittest.TestCase):
             self.assertEqual(tuple(sample["sdr_linear"].shape), (3, 32, 32))
             self.assertEqual(tuple(sample["target_maps"].shape), (3, 32, 32))
             self.assertEqual(tuple(sample["clip_mask"].shape), (1, 32, 32))
+            self.assertEqual(tuple(sample["near_white_mask"].shape), (1, 32, 32))
+            self.assertEqual(tuple(sample["shadow_mask"].shape), (1, 32, 32))
+            self.assertEqual(tuple(sample["memory_color_mask"].shape), (1, 32, 32))
+            self.assertEqual(tuple(sample["region_weight"].shape), (1, 32, 32))
 
     def test_validation_dataset_center_crops_large_frames(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

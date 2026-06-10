@@ -1,8 +1,10 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from types import SimpleNamespace
 
 from sdr2hdr.gui import (
+    SDR2HDRGUI,
     build_backend_options,
     build_encoder_options,
     filter_models_for_backend,
@@ -55,6 +57,23 @@ class GuiTests(unittest.TestCase):
         models = [Path("a.pt"), Path("b.onnx")]
         filtered = filter_models_for_backend(models, "auto", "Windows")
         self.assertEqual(filtered, [Path("a.pt")])
+
+    def test_build_request_includes_hdr_style(self) -> None:
+        app = SDR2HDRGUI.__new__(SDR2HDRGUI)
+        app.input_var = SimpleNamespace(get=lambda: "in.mp4")
+        app.output_var = SimpleNamespace(get=lambda: "out.mp4")
+        app.preset_var = SimpleNamespace(get=lambda: "portrait")
+        app.hdr_style_var = SimpleNamespace(get=lambda: "natural")
+        app.model_path_var = SimpleNamespace(get=lambda: "models\\model.pt")
+        app.ai_strength_var = SimpleNamespace(get=lambda: 0.25)
+        app._selected_encoder = lambda: "libx265"
+        app._selected_x265_mode = lambda: "balanced"
+        app._selected_backend = lambda: "auto"
+
+        request = SDR2HDRGUI._build_request(app)
+
+        self.assertEqual(request.hdr_style, "natural")
+        self.assertEqual(request.model_path, "models\\model.pt")
 
 
 if __name__ == "__main__":

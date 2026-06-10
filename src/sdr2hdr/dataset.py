@@ -32,6 +32,10 @@ class TargetMaps:
     contrast: np.ndarray
     protection: np.ndarray
     clip_mask: np.ndarray
+    near_white_mask: np.ndarray
+    shadow_mask: np.ndarray
+    memory_color_mask: np.ndarray
+    region_weight: np.ndarray
 
 
 def _compute_luma(frame: np.ndarray) -> np.ndarray:
@@ -66,6 +70,8 @@ def derive_target_maps(sdr_linear: np.ndarray, hdr_linear: np.ndarray) -> Target
     memory_color_target = estimate_memory_color_mask(hdr_linear, np.clip(luma_hdr, 0.0, 1.0))
     sdr_rgb8 = np.clip(np.round(linear_to_srgb(sdr_linear) * 255.0), 0, 255).astype(np.uint8)
     subtitle_target = estimate_subtitle_mask(sdr_rgb8[..., ::-1], np.clip(luma_sdr, 0.0, 1.0))
+    near_white_mask = np.clip((luma_sdr - 0.72) / 0.20, 0.0, 1.0).astype(np.float32)
+    shadow_mask = np.clip((0.22 - luma_sdr) / 0.22, 0.0, 1.0).astype(np.float32)
     protection_abs = np.maximum.reduce(
         [
             neutral_protection,
@@ -91,7 +97,26 @@ def derive_target_maps(sdr_linear: np.ndarray, hdr_linear: np.ndarray) -> Target
     )
     expansion *= ai_gate
     contrast *= np.clip(ai_gate + 0.15, 0.0, 1.0)
-    return TargetMaps(expansion=expansion, contrast=contrast, protection=protection, clip_mask=clip_mask)
+    region_weight = np.clip(
+        1.0
+        + skin_target * 0.45
+        + clipped_white * 0.65
+        + near_white_mask * 0.50
+        + shadow_mask * 0.55
+        + memory_color_target * 0.45,
+        1.0,
+        3.0,
+    ).astype(np.float32)
+    return TargetMaps(
+        expansion=expansion,
+        contrast=contrast,
+        protection=protection,
+        clip_mask=clip_mask,
+        near_white_mask=near_white_mask,
+        shadow_mask=shadow_mask,
+        memory_color_mask=memory_color_target.astype(np.float32),
+        region_weight=region_weight,
+    )
 
 
 def random_crop_pair(
@@ -103,11 +128,30 @@ def random_crop_pair(
     height, width = sdr_linear.shape[:2]
     crop_h = min(crop_size, height)
     crop_w = min(crop_size, width)
-    top = 0 if height == crop_h else rng.randint(0, height - crop_h)
-    left = 0 if width == crop_w else rng.randint(0, width - crop_w)
+    if height == crop_h and width == crop_w:
+        return sdr_linear, hdr_linear
+    importance = np.clip(
+        estimate_memory_color_mask(hdr_linear, np.clip(_compute_luma(hdr_linear), 0.0, 1.0))
+        + estimate_clipped_white_mask(hdr_linear, np.clip(_compute_luma(hdr_linear), 0.0, 1.0)) * 1.15
+        + np.clip((0.22 - _compute_luma(sdr_linear)) / 0.22, 0.0, 1.0) * 0.85,
+        0.0,
+        3.0,
+    )
+    best_top = 0
+    best_left = 0
+    best_score = -1.0
+    attempts = 6
+    for _ in range(attempts):
+        top = 0 if height == crop_h else rng.randint(0, height - crop_h)
+        left = 0 if width == crop_w else rng.randint(0, width - crop_w)
+        score = float(np.mean(importance[top : top + crop_h, left : left + crop_w]))
+        if score > best_score:
+            best_score = score
+            best_top = top
+            best_left = left
     return (
-        sdr_linear[top : top + crop_h, left : left + crop_w],
-        hdr_linear[top : top + crop_h, left : left + crop_w],
+        sdr_linear[best_top : best_top + crop_h, best_left : best_left + crop_w],
+        hdr_linear[best_top : best_top + crop_h, best_left : best_left + crop_w],
     )
 
 
@@ -181,4 +225,8 @@ class HDRSDRPairDataset(Dataset):
                 np.stack([targets.expansion, targets.contrast, targets.protection], axis=0)
             ).to(torch.float32),
             "clip_mask": torch.from_numpy(targets.clip_mask[None]).to(torch.float32),
+            "near_white_mask": torch.from_numpy(targets.near_white_mask[None]).to(torch.float32),
+            "shadow_mask": torch.from_numpy(targets.shadow_mask[None]).to(torch.float32),
+            "memory_color_mask": torch.from_numpy(targets.memory_color_mask[None]).to(torch.float32),
+            "region_weight": torch.from_numpy(targets.region_weight[None]).to(torch.float32),
         }

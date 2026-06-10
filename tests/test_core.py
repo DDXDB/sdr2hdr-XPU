@@ -21,6 +21,7 @@ from sdr2hdr.core import (
     estimate_skin_mask,
     estimate_specular_mask,
     estimate_subtitle_mask,
+    limit_shadow_lift,
     limit_ai_highlight_expansion,
     linear_to_pq,
     srgb_to_linear,
@@ -129,6 +130,14 @@ class CoreTests(unittest.TestCase):
         rolloff = apply_near_white_rolloff(luma, 0.78, 0.6)
         self.assertAlmostEqual(float(rolloff[0, 0]), 1.0)
         self.assertGreater(float(rolloff[0, 1]), float(rolloff[0, 2]))
+
+    def test_shadow_lift_limit_caps_dark_region_gain(self) -> None:
+        relight = np.array([[2.0, 1.8, 1.4]], dtype=np.float32)
+        luma = np.array([[0.05, 0.18, 0.55]], dtype=np.float32)
+        limited = limit_shadow_lift(relight, luma, 0.4)
+        self.assertLess(float(limited[0, 0]), float(relight[0, 0]))
+        self.assertLess(float(limited[0, 1]), float(relight[0, 1]))
+        self.assertAlmostEqual(float(limited[0, 2]), float(relight[0, 2]))
 
     def test_ai_highlight_limiter_suppresses_clipped_and_near_white_regions(self) -> None:
         expansion = np.ones((1, 3), dtype=np.float32)

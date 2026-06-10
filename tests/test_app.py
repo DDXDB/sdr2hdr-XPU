@@ -62,6 +62,31 @@ class AppTests(unittest.TestCase):
             config, _, _ = build_request_config(request)
             self.assertEqual(config.ai_strength, 0.25)
 
+    def test_hdr_style_adjusts_temporal_and_shadow_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir) / "in.mp4"
+            model_path = Path(temp_dir) / "model.pt"
+            input_path.write_bytes(b"")
+            model_path.write_bytes(b"")
+            natural = ConversionRequest(
+                input_path=str(input_path),
+                output_path=str(Path(temp_dir) / "natural.mp4"),
+                preset="balanced",
+                hdr_style="natural",
+                model_path=str(model_path),
+            )
+            night = ConversionRequest(
+                input_path=str(input_path),
+                output_path=str(Path(temp_dir) / "night.mp4"),
+                preset="balanced",
+                hdr_style="night",
+                model_path=str(model_path),
+            )
+            natural_config, _, _ = build_request_config(natural)
+            night_config, _, _ = build_request_config(night)
+            self.assertGreater(natural_config.shadow_lift_limit, night_config.shadow_lift_limit)
+            self.assertGreater(night_config.temporal_stability_strength, natural_config.temporal_stability_strength)
+
     def test_validate_request_requires_model_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             input_path = Path(temp_dir) / "in.mp4"
