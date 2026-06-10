@@ -86,6 +86,17 @@ HDR_STYLE_DEFAULTS = {
 }
 
 
+TONE_DIFFUSE_WHITE = {
+    # SDR diffuse white anchor in nits. "vivid" keeps the legacy behavior of
+    # anchoring SDR white at peak_nits; "reference" follows BT.2408 (~203 nits)
+    # and reserves the range above for expanded highlights.
+    "vivid": None,
+    "reference": 203.0,
+}
+
+INPUT_EOTF_OPTIONS = ("srgb", "bt1886")
+
+
 @dataclass
 class ConversionRequest:
     input_path: str
@@ -103,6 +114,8 @@ class ConversionRequest:
     fast_mode: bool = False
     backend: str = "auto"
     hdr_style: str = "natural"
+    tone: str = "vivid"
+    input_eotf: str = "srgb"
     model_path: str | None = None
     device: str = "cpu"
     max_frames: int | None = None
@@ -165,6 +178,8 @@ def build_request_config(request: ConversionRequest) -> tuple[ProcessorConfig, s
     config.shadow_lift_limit = style["shadow_lift_limit"]
     config.temporal_stability_strength = style["temporal_stability_strength"]
     config.detail_boost *= style["detail_boost_scale"]
+    config.diffuse_white_nits = TONE_DIFFUSE_WHITE[request.tone]
+    config.input_eotf = request.input_eotf
     config.backend = request.backend
     profile = X265_PROFILE_DEFAULTS[request.x265_mode]
     x265_preset = request.x265_preset or profile["preset"]
@@ -191,6 +206,10 @@ def validate_request(request: ConversionRequest) -> None:
         raise ValueError(f"Unknown preset: {request.preset}")
     if request.hdr_style not in HDR_STYLE_DEFAULTS:
         raise ValueError(f"Unknown HDR style: {request.hdr_style}")
+    if request.tone not in TONE_DIFFUSE_WHITE:
+        raise ValueError(f"Unknown tone mode: {request.tone}")
+    if request.input_eotf not in INPUT_EOTF_OPTIONS:
+        raise ValueError(f"Unknown input EOTF: {request.input_eotf}")
     if request.x265_mode not in X265_PROFILE_DEFAULTS:
         raise ValueError(f"Unknown x265 mode: {request.x265_mode}")
     if request.model_path and not model_path.exists():

@@ -64,6 +64,8 @@ class GuiTests(unittest.TestCase):
         app.output_var = SimpleNamespace(get=lambda: "out.mp4")
         app.preset_var = SimpleNamespace(get=lambda: "portrait")
         app.hdr_style_var = SimpleNamespace(get=lambda: "natural")
+        app.tone_var = SimpleNamespace(get=lambda: "reference")
+        app.input_eotf_var = SimpleNamespace(get=lambda: "bt1886")
         app.model_path_var = SimpleNamespace(get=lambda: "models\\model.pt")
         app.ai_strength_var = SimpleNamespace(get=lambda: 0.25)
         app._selected_encoder = lambda: "libx265"
@@ -73,6 +75,8 @@ class GuiTests(unittest.TestCase):
         request = SDR2HDRGUI._build_request(app)
 
         self.assertEqual(request.hdr_style, "natural")
+        self.assertEqual(request.tone, "reference")
+        self.assertEqual(request.input_eotf, "bt1886")
         self.assertEqual(request.model_path, "models\\model.pt")
 
 

@@ -55,8 +55,19 @@ def srgb_to_linear(frame: np.ndarray) -> np.ndarray:
     return np.where(frame <= 0.04045, frame / 12.92, ((frame + 0.055) / 1.055) ** 2.4)
 
 
-def linear_to_pq(frame: np.ndarray, peak_nits: float) -> np.ndarray:
-    normalized = np.clip(frame * peak_nits / 10000.0, 0.0, 1.0)
+def bt1886_to_linear(frame: np.ndarray) -> np.ndarray:
+    # BT.1886 with zero black luminance reduces to a pure 2.4 power law,
+    # the conventional decode for broadcast/BT.709 video sources.
+    return np.power(np.clip(frame, 0.0, 1.0), 2.4)
+
+
+def linear_to_pq(frame: np.ndarray, peak_nits: float, diffuse_white_nits: float | None = None) -> np.ndarray:
+    if diffuse_white_nits is not None:
+        # Reference anchoring (BT.2408): SDR diffuse white sits at
+        # diffuse_white_nits and expanded highlights may not exceed peak_nits.
+        normalized = np.clip(frame * diffuse_white_nits / 10000.0, 0.0, peak_nits / 10000.0)
+    else:
+        normalized = np.clip(frame * peak_nits / 10000.0, 0.0, 1.0)
     numerator = _PQ_C1 + _PQ_C2 * np.power(normalized, _PQ_M1)
     denominator = 1.0 + _PQ_C3 * np.power(normalized, _PQ_M1)
     return np.power(numerator / denominator, _PQ_M2)
@@ -103,6 +114,9 @@ class ProcessorConfig:
     adaptive_highlight_max: float = 1.05
     temporal_stability_strength: float = 0.72
     shadow_lift_limit: float = 0.55
+    diffuse_white_nits: float | None = None
+    input_eotf: str = "srgb"
+    dither_strength: float = 1.0
 
 
 class TemporalState:
@@ -216,6 +230,7 @@ class SDRToHDRProcessor:
         self._max_pq: float = 0.0
         self._sum_mean_pq: float = 0.0
         self._frame_count: int = 0
+        self._dither_rng = np.random.default_rng(0)
         if torch is not None and self.torch_device is not None:
             self._rec2020_t = torch.from_numpy(REC709_TO_REC2020).to(self.torch_device, dtype=torch.float32)
             self._laplacian_kernel_t = torch.tensor(
@@ -332,10 +347,44 @@ class SDRToHDRProcessor:
             torch.pow((frame + 0.055) / 1.055, 2.4),
         )
 
+    def _torch_bt1886_to_linear(self, frame: torch.Tensor) -> torch.Tensor:
+        return torch.pow(torch.clamp(frame, 0.0, 1.0), 2.4)
+
+    def _torch_decode_to_linear(self, frame: torch.Tensor) -> torch.Tensor:
+        if self.config.input_eotf == "bt1886":
+            return self._torch_bt1886_to_linear(frame)
+        return self._torch_srgb_to_linear(frame)
+
     def _torch_linear_to_pq(self, frame: torch.Tensor) -> torch.Tensor:
-        normalized = torch.clamp(frame * self.config.peak_nits / 10000.0, 0.0, 1.0)
+        if self.config.diffuse_white_nits is not None:
+            normalized = torch.clamp(
+                frame * self.config.diffuse_white_nits / 10000.0,
+                0.0,
+                self.config.peak_nits / 10000.0,
+            )
+        else:
+            normalized = torch.clamp(frame * self.config.peak_nits / 10000.0, 0.0, 1.0)
         power = torch.pow(normalized, _PQ_M1)
         return torch.pow((_PQ_C1 + _PQ_C2 * power) / (1.0 + _PQ_C3 * power), _PQ_M2)
+
+    def _torch_apply_dither(self, frame_pq: torch.Tensor) -> torch.Tensor:
+        # TPDF dither at one 10-bit LSB so the downstream 10-bit quantization
+        # breaks up banding from expanded 8-bit gradients.
+        if self.config.dither_strength <= 0.0:
+            return frame_pq
+        amplitude = self.config.dither_strength / 1023.0
+        noise = (torch.rand_like(frame_pq) - torch.rand_like(frame_pq)) * amplitude
+        return frame_pq + noise
+
+    def _apply_dither_np(self, frame_pq: np.ndarray) -> np.ndarray:
+        if self.config.dither_strength <= 0.0:
+            return frame_pq
+        amplitude = self.config.dither_strength / 1023.0
+        noise = (
+            self._dither_rng.random(frame_pq.shape, dtype=np.float32)
+            - self._dither_rng.random(frame_pq.shape, dtype=np.float32)
+        ) * amplitude
+        return frame_pq + noise
 
     def _torch_downsample(self, image: torch.Tensor, size: int = 32) -> torch.Tensor:
         assert F is not None
@@ -570,7 +619,7 @@ class SDRToHDRProcessor:
 
         frame_rgb = work_bgr8[..., ::-1].astype(np.float32) / 255.0
         frame_rgb_t = self._tensor_from_rgb(frame_rgb)
-        frame_linear_t = self._torch_srgb_to_linear(frame_rgb_t)
+        frame_linear_t = self._torch_decode_to_linear(frame_rgb_t)
         luma_t = torch.clamp(self._torch_compute_luma(frame_linear_t), 0.0, 1.0)
         chroma_t = self._torch_compute_chroma(frame_linear_t)
         scene_maps_t = torch.stack([self._torch_downsample(luma_t), self._torch_downsample(chroma_t)])
@@ -750,7 +799,7 @@ class SDRToHDRProcessor:
 
         assert self._rec2020_t is not None
         frame_2020_t = torch.clamp(torch.matmul(frame_linear_t, self._rec2020_t.T), min=0.0)
-        frame_pq_t = self._torch_linear_to_pq(frame_2020_t)
+        frame_pq_t = self._torch_apply_dither(self._torch_linear_to_pq(frame_2020_t))
         frame_16 = torch.clamp(torch.round(frame_pq_t * 65535.0), 0, 65535).to(torch.uint16).cpu().numpy()
         self._update_pq_stats(frame_16)
         return frame_16
@@ -767,7 +816,11 @@ class SDRToHDRProcessor:
             work_bgr8 = frame_bgr8
 
         frame_rgb = work_bgr8[..., ::-1].astype(np.float32) / 255.0
-        frame_linear = srgb_to_linear(frame_rgb)
+        frame_linear = (
+            bt1886_to_linear(frame_rgb)
+            if self.config.input_eotf == "bt1886"
+            else srgb_to_linear(frame_rgb)
+        )
         luma = np.clip(compute_luma(frame_linear), 0.0, 1.0)
         chroma = compute_chroma(frame_linear)
         luma_small = downsample_map(luma)
@@ -875,7 +928,7 @@ class SDRToHDRProcessor:
         if work_bgr8.shape[:2] != (original_height, original_width):
             frame_linear = cv2.resize(frame_linear, (original_width, original_height), interpolation=cv2.INTER_LINEAR)
         frame_2020 = apply_matrix(frame_linear, REC709_TO_REC2020)
-        frame_pq = linear_to_pq(frame_2020, self.config.peak_nits)
+        frame_pq = self._apply_dither_np(linear_to_pq(frame_2020, self.config.peak_nits, self.config.diffuse_white_nits))
         frame_16 = np.clip(np.round(frame_pq * 65535.0), 0, 65535).astype(np.uint16)
         self._update_pq_stats(frame_16)
         return frame_16

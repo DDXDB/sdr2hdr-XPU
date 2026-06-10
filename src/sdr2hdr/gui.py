@@ -16,7 +16,9 @@ from sdr2hdr.app import (
     ConversionCallbacks,
     ConversionRequest,
     HDR_STYLE_DEFAULTS,
+    INPUT_EOTF_OPTIONS,
     PRESETS,
+    TONE_DIFFUSE_WHITE,
     X265_PROFILE_DEFAULTS,
     build_output_path,
     default_encoder_for_platform,
@@ -170,6 +172,8 @@ class SDR2HDRGUI:
         self.output_var = tk.StringVar()
         self.preset_var = tk.StringVar(value="portrait")
         self.hdr_style_var = tk.StringVar(value="natural")
+        self.tone_var = tk.StringVar(value="vivid")
+        self.input_eotf_var = tk.StringVar(value="srgb")
         self.encoder_var = tk.StringVar(value=self.encoder_options[default_encoder])
         self.x265_mode_var = tk.StringVar(value=X265_MODE_OPTIONS["balanced"])
         self.backend_var = tk.StringVar(value=self.backend_options["auto"])
@@ -221,20 +225,22 @@ class SDR2HDRGUI:
 
         self.preset_combo = self._add_combo_row(form, 2, "Preset", self.preset_var, list(PRESETS))
         self.hdr_style_combo = self._add_combo_row(form, 3, "HDR Style", self.hdr_style_var, list(HDR_STYLE_DEFAULTS))
-        self.encoder_combo = self._add_combo_row(form, 4, "Encoder", self.encoder_var, list(self.encoder_options.values()))
-        self.x265_combo = self._add_combo_row(form, 5, "Speed/Quality", self.x265_mode_var, list(X265_MODE_OPTIONS.values()))
-        self.backend_combo = self._add_combo_row(form, 6, "Backend", self.backend_var, list(self.backend_options.values()))
+        self.tone_combo = self._add_combo_row(form, 4, "Tone", self.tone_var, list(TONE_DIFFUSE_WHITE))
+        self.input_eotf_combo = self._add_combo_row(form, 5, "Input EOTF", self.input_eotf_var, list(INPUT_EOTF_OPTIONS))
+        self.encoder_combo = self._add_combo_row(form, 6, "Encoder", self.encoder_var, list(self.encoder_options.values()))
+        self.x265_combo = self._add_combo_row(form, 7, "Speed/Quality", self.x265_mode_var, list(X265_MODE_OPTIONS.values()))
+        self.backend_combo = self._add_combo_row(form, 8, "Backend", self.backend_var, list(self.backend_options.values()))
         self.model_combo = self._add_combo_row(
             form,
-            7,
+            9,
             "AI Model",
             self.model_name_var,
             [path.name for path in self.filtered_models] or ["No compatible models"],
         )
-        ttk.Button(form, text="Refresh", command=self._refresh_available_models).grid(row=7, column=2, padx=(8, 0))
-        ttk.Label(form, text="AI Strength").grid(row=8, column=0, sticky="w", pady=6, padx=(0, 12))
+        ttk.Button(form, text="Refresh", command=self._refresh_available_models).grid(row=9, column=2, padx=(8, 0))
+        ttk.Label(form, text="AI Strength").grid(row=10, column=0, sticky="w", pady=6, padx=(0, 12))
         slider_row = ttk.Frame(form)
-        slider_row.grid(row=8, column=1, sticky="ew", pady=6)
+        slider_row.grid(row=10, column=1, sticky="ew", pady=6)
         slider_row.columnconfigure(0, weight=1)
         self.ai_strength_scale = ttk.Scale(
             slider_row,
@@ -246,7 +252,7 @@ class SDR2HDRGUI:
         )
         self.ai_strength_scale.grid(row=0, column=0, sticky="ew")
         ttk.Label(slider_row, textvariable=self.ai_strength_label_var, width=5).grid(row=0, column=1, padx=(8, 0))
-        ttk.Label(form, textvariable=self.mode_hint_var).grid(row=9, column=1, sticky="w", pady=(4, 0))
+        ttk.Label(form, textvariable=self.mode_hint_var).grid(row=11, column=1, sticky="w", pady=(4, 0))
 
         controls = ttk.Frame(left)
         controls.grid(row=1, column=0, sticky="ew", pady=(16, 12))
@@ -445,6 +451,8 @@ class SDR2HDRGUI:
             output_path=self.output_var.get().strip(),
             preset=self.preset_var.get(),
             hdr_style=self.hdr_style_var.get(),
+            tone=self.tone_var.get(),
+            input_eotf=self.input_eotf_var.get(),
             encoder=self._selected_encoder(),
             x265_mode=self._selected_x265_mode(),
             backend=self._selected_backend(),
@@ -511,6 +519,8 @@ class SDR2HDRGUI:
                 output_path=output_path,
                 preset=self.preset_var.get(),
                 hdr_style=self.hdr_style_var.get(),
+                tone=self.tone_var.get(),
+                input_eotf=self.input_eotf_var.get(),
                 encoder=self._selected_encoder(),
                 x265_mode=self._selected_x265_mode(),
                 backend=self._selected_backend(),
@@ -631,6 +641,8 @@ class SDR2HDRGUI:
         self.open_folder_button.configure(state="normal" if idle_like and self.last_output_path else "disabled")
         self.preset_combo.configure(state=combo_state)
         self.hdr_style_combo.configure(state=combo_state)
+        self.tone_combo.configure(state=combo_state)
+        self.input_eotf_combo.configure(state=combo_state)
         self.encoder_combo.configure(state=combo_state)
         self.backend_combo.configure(state=combo_state)
         self._sync_encoder_ui()

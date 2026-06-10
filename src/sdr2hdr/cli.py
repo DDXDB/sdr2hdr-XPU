@@ -5,7 +5,9 @@ from pathlib import Path
 
 from .app import (
     HDR_STYLE_DEFAULTS,
+    INPUT_EOTF_OPTIONS,
     PRESETS,
+    TONE_DIFFUSE_WHITE,
     X265_PROFILE_DEFAULTS,
     ConversionCallbacks,
     ConversionRequest,
@@ -24,6 +26,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--x265-mode", choices=sorted(X265_PROFILE_DEFAULTS), default="balanced")
     parser.add_argument("--backend", choices=["auto", "numpy", "cuda", "mps"], default="auto")
     parser.add_argument("--hdr-style", choices=sorted(HDR_STYLE_DEFAULTS), default="natural")
+    parser.add_argument(
+        "--tone",
+        choices=sorted(TONE_DIFFUSE_WHITE),
+        default="vivid",
+        help="Brightness anchoring: vivid maps SDR white to peak nits, reference anchors it at 203 nits (BT.2408)",
+    )
+    parser.add_argument(
+        "--input-eotf",
+        choices=sorted(INPUT_EOTF_OPTIONS),
+        default="srgb",
+        help="Transfer function used to decode the SDR input (bt1886 for broadcast/BT.709 video)",
+    )
     parser.add_argument("--device", default="auto")
     parser.add_argument("--model-path", required=True, help="Path to a TorchScript .pt enhancement model")
     parser.add_argument("--ai-strength", type=float, default=0.25)
@@ -56,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
         x265_mode=args.x265_mode,
         backend=args.backend,
         hdr_style=args.hdr_style,
+        tone=args.tone,
+        input_eotf=args.input_eotf,
         device=args.device,
         model_path=model_path,
         ai_strength=args.ai_strength,

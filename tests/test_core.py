@@ -21,6 +21,7 @@ from sdr2hdr.core import (
     estimate_skin_mask,
     estimate_specular_mask,
     estimate_subtitle_mask,
+    bt1886_to_linear,
     limit_shadow_lift,
     limit_ai_highlight_expansion,
     linear_to_pq,
@@ -59,6 +60,38 @@ class CoreTests(unittest.TestCase):
         self.assertAlmostEqual(float(out[-1]), 1.0)
         self.assertGreater(float(out[1]), 0.0)
         self.assertLess(float(out[1]), 0.5)
+
+    def test_bt1886_to_linear_is_pure_power_law(self) -> None:
+        sample = np.array([0.0, 0.5, 1.0], dtype=np.float32)
+        out = bt1886_to_linear(sample)
+        self.assertAlmostEqual(float(out[0]), 0.0)
+        self.assertAlmostEqual(float(out[1]), 0.5 ** 2.4, places=6)
+        self.assertAlmostEqual(float(out[-1]), 1.0)
+        # Decodes darker than sRGB in the shadows
+        self.assertLess(float(out[1]), float(srgb_to_linear(sample)[1]))
+
+    def test_linear_to_pq_reference_anchor_places_white_at_diffuse_nits(self) -> None:
+        white = np.array([1.0], dtype=np.float32)
+        anchored = linear_to_pq(white, peak_nits=1000.0, diffuse_white_nits=203.0)
+        direct_203 = linear_to_pq(np.array([203.0 / 1000.0], dtype=np.float32), peak_nits=1000.0)
+        self.assertAlmostEqual(float(anchored[0]), float(direct_203[0]), places=6)
+
+    def test_linear_to_pq_reference_anchor_clamps_at_peak(self) -> None:
+        highlights = np.array([4.0, 8.0], dtype=np.float32)
+        out = linear_to_pq(highlights, peak_nits=600.0, diffuse_white_nits=203.0)
+        peak_code = linear_to_pq(np.array([600.0 / 600.0], dtype=np.float32), peak_nits=600.0)
+        self.assertLessEqual(float(out.max()), float(peak_code[0]) + 1e-6)
+
+    def test_dither_is_bounded_and_disabled_at_zero_strength(self) -> None:
+        config = ProcessorConfig(backend="numpy", dither_strength=1.0)
+        processor = SDRToHDRProcessor(config)
+        frame_pq = np.full((16, 16), 0.5, dtype=np.float32)
+        dithered = processor._apply_dither_np(frame_pq)
+        self.assertLessEqual(float(np.abs(dithered - frame_pq).max()), 1.0 / 1023.0 + 1e-7)
+        self.assertGreater(float(np.abs(dithered - frame_pq).max()), 0.0)
+        config_off = ProcessorConfig(backend="numpy", dither_strength=0.0)
+        processor_off = SDRToHDRProcessor(config_off)
+        self.assertTrue(np.array_equal(processor_off._apply_dither_np(frame_pq), frame_pq))
 
     def test_linear_to_pq_is_monotonic(self) -> None:
         values = np.array([0.0, 0.18, 0.5, 1.0], dtype=np.float32)

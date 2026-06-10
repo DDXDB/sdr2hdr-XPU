@@ -87,6 +87,51 @@ class AppTests(unittest.TestCase):
             self.assertGreater(natural_config.shadow_lift_limit, night_config.shadow_lift_limit)
             self.assertGreater(night_config.temporal_stability_strength, natural_config.temporal_stability_strength)
 
+    def test_tone_reference_anchors_diffuse_white(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir) / "in.mp4"
+            model_path = Path(temp_dir) / "model.pt"
+            input_path.write_bytes(b"")
+            model_path.write_bytes(b"")
+            vivid = ConversionRequest(
+                input_path=str(input_path),
+                output_path=str(Path(temp_dir) / "vivid.mp4"),
+                preset="balanced",
+                tone="vivid",
+                model_path=str(model_path),
+            )
+            reference = ConversionRequest(
+                input_path=str(input_path),
+                output_path=str(Path(temp_dir) / "ref.mp4"),
+                preset="balanced",
+                tone="reference",
+                input_eotf="bt1886",
+                model_path=str(model_path),
+            )
+            vivid_config, _, _ = build_request_config(vivid)
+            reference_config, _, _ = build_request_config(reference)
+            self.assertIsNone(vivid_config.diffuse_white_nits)
+            self.assertEqual(reference_config.diffuse_white_nits, 203.0)
+            self.assertEqual(vivid_config.input_eotf, "srgb")
+            self.assertEqual(reference_config.input_eotf, "bt1886")
+
+    def test_validate_request_rejects_unknown_tone_and_eotf(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_path = Path(temp_dir) / "in.mp4"
+            model_path = Path(temp_dir) / "model.pt"
+            input_path.write_bytes(b"")
+            model_path.write_bytes(b"")
+            base = dict(
+                input_path=str(input_path),
+                output_path=str(Path(temp_dir) / "out.mp4"),
+                preset="portrait",
+                model_path=str(model_path),
+            )
+            with self.assertRaises(ValueError):
+                validate_request(ConversionRequest(tone="punchy", **base))
+            with self.assertRaises(ValueError):
+                validate_request(ConversionRequest(input_eotf="gamma22", **base))
+
     def test_validate_request_requires_model_file(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             input_path = Path(temp_dir) / "in.mp4"
