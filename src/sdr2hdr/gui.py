@@ -58,6 +58,8 @@ def describe_mode_hint(encoder: str, mode: str, backend: str, preset: str, model
         return "Fastest on supported Macs. Falls back to libx265 if VideoToolbox fails."
     if encoder == "hevc_nvenc":
         return "Fastest on supported NVIDIA GPUs. Falls back to libx265 if NVENC fails."
+    if encoder == "hevc_qsv":
+        return "Fastest on supported Intel GPUs. Falls back to libx265 if QSV fails."
     if mode == "preview":
         speed = "Fastest x265 mode, lower compression efficiency."
     elif mode == "final":
@@ -67,6 +69,8 @@ def describe_mode_hint(encoder: str, mode: str, backend: str, preset: str, model
     if model_path.strip():
         if backend == "cuda":
             return speed + " Learned-map mode enabled on NVIDIA GPU."
+        if backend == "xpu":
+            return speed + " Learned-map mode enabled on Intel GPU."
         if backend == "mps":
             return speed + " Learned-map mode enabled on Apple GPU."
         return speed + " Learned-map mode enabled."
@@ -74,6 +78,8 @@ def describe_mode_hint(encoder: str, mode: str, backend: str, preset: str, model
         return speed + " Uses Apple GPU."
     if backend == "cuda":
         return speed + " Uses NVIDIA GPU for processing."
+    if backend == "xpu":
+        return speed + " Uses Intel GPU for processing."
     return speed
 
 
@@ -87,6 +93,7 @@ def build_encoder_options(system_name: str | None = None) -> dict[str, str]:
         options["hevc_videotoolbox"] = "VideoToolbox (Fast on Mac)"
     elif system_name == "Windows":
         options["hevc_nvenc"] = "NVENC (Fast on NVIDIA)"
+        options["hevc_qsv"] = "QSV (Fast on Intel)"
     return options
 
 
@@ -97,6 +104,7 @@ def build_backend_options(system_name: str | None = None) -> dict[str, str]:
         options["mps"] = "MPS (Apple GPU)"
     if system_name == "Windows":
         options["cuda"] = "CUDA (NVIDIA GPU)"
+        options["xpu"] = "XPU (Intel GPU)"
     options["numpy"] = "CPU / NumPy"
     return options
 

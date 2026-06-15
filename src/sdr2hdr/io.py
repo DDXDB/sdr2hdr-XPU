@@ -217,6 +217,37 @@ def open_encoder(
             "-colorspace",
             "bt2020nc",
         ]
+    elif encoder == "hevc_qsv":
+        cmd += [
+            "-pix_fmt",
+            "p010le",
+            "-vf",
+            "scale=in_color_matrix=bt2020:out_color_matrix=bt2020",
+            "-c:v",
+            "hevc_qsv",
+            "-profile:v",
+            "main10",
+            "-preset",
+            "p5",
+            "-tune",
+            "hq",
+            "-rc",
+            "vbr",
+            "-cq",
+            "18",
+            "-b:v",
+            "0",
+            "-tag:v",
+            "hvc1",
+            "-bsf:v",
+            "hevc_metadata=colour_primaries=9:transfer_characteristics=16:matrix_coefficients=9",
+            "-color_primaries",
+            "bt2020",
+            "-color_trc",
+            "smpte2084",
+            "-colorspace",
+            "bt2020nc",
+        ]
         cmd += audio_args + [output_path]
     else:
         cmd += [
